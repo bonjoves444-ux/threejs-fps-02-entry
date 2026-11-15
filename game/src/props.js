@@ -45,6 +45,7 @@ export class QuayProps {
     this.buildGroundProps();
     this.buildOverlook();
     this.buildBoards();
+    this.buildBeacon();
     this.buildSky();
   }
   // --- helpers that reuse the map's shared box geometry ---
@@ -193,6 +194,23 @@ export class QuayProps {
     }
   }
 
+  buildBeacon() {
+    // Harbour-light tower on the south-west corner, over the water edge: a
+    // landmark visible from everywhere, its beam sweeping the quay all round.
+    const tx = -28.5, tz = 18.5;
+    const mast = this.cyl(0.5, 13, PAL.steelDark, 10);
+    mast.position.set(tx, 6.5, tz);
+    const house = this.solid(tx, 13.4, tz, 1.6, 1.2, 1.6, PAL.yellow);
+    const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.5, 10, 8),
+      new THREE.MeshBasicMaterial({ color: 0xffe9bb }));
+    lamp.position.set(tx, 14.2, tz); this.group.add(lamp);
+    const beam = new THREE.Mesh(new THREE.BoxGeometry(26, 0.5, 1.1),
+      new THREE.MeshBasicMaterial({ color: 0xffe9bb, transparent: true, opacity: 0.16, blending: THREE.AdditiveBlending, depthWrite: false }));
+    beam.position.set(tx, 14.2, tz); this.scene.add(beam);
+    this.animated.push({ mesh: beam, kind: 'beacon', phase: 0, x0: tx, z0: tz });
+    this.map.colliders.push({ minX: tx - 0.5, maxX: tx + 0.5, minY: 0, maxY: 13, minZ: tz - 0.5, maxZ: tz + 0.5 });
+  }
+
   buildSky() {
     // Drifting clouds: big soft translucent planes high over the quay.
     for (let i = 0; i < 6; i++) {
@@ -251,6 +269,10 @@ export class QuayProps {
       } else if (a.kind === 'flag') {
         a.mesh.rotation.y = Math.sin(time * 2.2 + a.phase) * 0.35;
         a.mesh.scale.x = 1 + Math.sin(time * 3.1 + a.phase) * 0.08;
+      } else if (a.kind === 'beacon') {
+        // The harbour light sweeps slowly, its beam pivoting over the quay.
+        a.mesh.position.set(a.x0, 14.2, a.z0);
+        a.mesh.rotation.y = time * 0.25;
       } else if (a.kind === 'shimmer') {
         a.mesh.position.x = a.x0 + Math.sin(time * 0.12 + a.phase) * 6;
         a.mesh.material.opacity = 0.10 + Math.sin(time * 0.4 + a.phase) * 0.06;

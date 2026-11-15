@@ -48,6 +48,24 @@ export class Effects {
     this.flashLight = new THREE.PointLight(0xffc98a, 0, 9, 1.6);
     scene.add(this.flashLight);
     this.flashLife = 0;
+    // --- shell casings: a pooled set of tiny brass boxes, kicked out on shots.
+    this.casings = [];
+    const cGeo = new THREE.BoxGeometry(0.025, 0.025, 0.055);
+    const cMat = new THREE.MeshBasicMaterial({ color: 0xd8a93a });
+    for (let i = 0; i < 16; i++) {
+      const mesh = new THREE.Mesh(cGeo, cMat);
+      mesh.visible = false; scene.add(mesh);
+      this.casings.push({ mesh, life: 0, vx: 0, vy: 0, vz: 0 });
+    }
+    this.casingIdx = 0;
+  }
+  casing(pos, right) {
+    const c = this.casings[this.casingIdx]; this.casingIdx = (this.casingIdx + 1) % this.casings.length;
+    c.mesh.position.set(pos.x + right.x * 0.15, pos.y - 0.08, pos.z + right.z * 0.15);
+    c.vx = right.x * (0.8 + Math.random() * 0.8);
+    c.vy = 1.4 + Math.random() * 0.9;
+    c.vz = right.z * (0.8 + Math.random() * 0.8) - 0.4;
+    c.life = 0.9; c.mesh.visible = true;
   }
   tracer(from, to, color = 0xffe9a8) {
     const t = this.tracers[this.tracerIdx]; this.tracerIdx = (this.tracerIdx + 1) % TRACER_MAX;
@@ -119,6 +137,16 @@ export class Effects {
       s.mesh.position.y = s.y + (1 - s.life / s.max) * 1.2;
       s.mesh.material.opacity = Math.min(0.6, (s.life / s.max) * 1.0);
       if (s.life <= 0) { s.mesh.visible = false; s.mesh.material.opacity = 0; }
+    }
+    // Casings arc, bounce once on the quay and fade.
+    for (const c of this.casings) {
+      if (c.life <= 0) continue;
+      c.life -= dt;
+      c.mesh.position.x += c.vx * dt; c.mesh.position.y += c.vy * dt; c.mesh.position.z += c.vz * dt;
+      c.vy -= 9.8 * dt;
+      if (c.mesh.position.y < 0.03) { c.mesh.position.y = 0.03; c.vy *= -0.35; c.vx *= 0.6; c.vz *= 0.6; }
+      c.mesh.rotation.x += dt * 9; c.mesh.rotation.z += dt * 7;
+      if (c.life <= 0) c.mesh.visible = false;
     }
     let any = false;
     for (let i = 0; i < SPARK_MAX; i++) {

@@ -90,6 +90,7 @@ export class Sfx {
   defuse() { this.tone(660, 0.09, 'sine', 0.2); this.tone(990, 0.12, 'sine', 0.2, 0, 0.12); }
   explosion() { this.noise(0.7, 160, 0.6, 1.0); this.tone(70, 0.6, 'sine', 0.8, 30); }
   flashbang() { this.noise(0.35, 2600, 0.8, 0.5); this.tone(2400, 0.3, 'sine', 0.12); }
+  flarePop() { this.noise(0.3, 1200, 1.0, 0.4); this.tone(900, 0.25, 'sine', 0.15, 1400); }
   roundStart() { this.tone(523, 0.12, 'triangle', 0.22); this.tone(784, 0.2, 'triangle', 0.22, 0, 0.12); }
   roundWin() { this.tone(523, 0.14, 'triangle', 0.25); this.tone(659, 0.14, 'triangle', 0.25, 0, 0.14); this.tone(784, 0.26, 'triangle', 0.28, 0, 0.28); }
   roundLose() { this.tone(392, 0.16, 'triangle', 0.22); this.tone(311, 0.3, 'triangle', 0.22, 0, 0.16); }

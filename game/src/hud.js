@@ -3,7 +3,7 @@
 // go through here so the game logic never touches the DOM directly, and the
 // minimap is drawn from the same map data the bots walk on.
 import { MAP } from './map.js';
-import { WEAPONS, GRENADES, ARMOUR_PRICE, KIT_PRICE } from './weapons.js';
+import { WEAPONS, GRENADES, FLAVOUR, ARMOUR_PRICE, KIT_PRICE } from './weapons.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -27,18 +27,20 @@ export class Hud {
     sec = Math.max(0, Math.ceil(sec));
     return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
   }
-  setScore(defScore, atkScore, round, maxRounds, timer, pipsDef, pipsAtk, phase) {
+  setScore(defScore, atkScore, round, maxRounds, timer, pipsDef, pipsAtk, phase, planted) {
     $('scoreDef').textContent = defScore;
     $('scoreAtk').textContent = atkScore;
     $('roundLbl').textContent = phase === 'buy' ? `BUY · ROUND ${round} / ${maxRounds}` : `ROUND ${round} / ${maxRounds}`;
+    $('phaseLbl').textContent = phase === 'buy' ? 'BUY PHASE' : planted ? 'CHARGE PLANTED' : phase === 'round' ? 'LIVE' : 'ROUND OVER';
+    $('phaseLbl').style.color = planted ? '#ff6b61' : '#ffb02e';
     $('timer').textContent = this.fmtTime(timer);
     $('timer').style.color = timer <= 10 && phase === 'round' ? '#ff6b61' : '#fff';
-    this.pips($('pipsDef'), pipsDef);
-    this.pips($('pipsAtk'), pipsAtk);
+    this.pips($('pipsDef'), pipsDef, 7);
+    this.pips($('pipsAtk'), pipsAtk, 7);
   }
-  pips(el, won) {
+  pips(el, won, total) {
     let html = '';
-    for (let i = 0; i < 9; i++) html += `<i class="${i < won ? 'won' : ''}"></i>`;
+    for (let i = 0; i < total; i++) html += `<i class="${i < won ? 'won' : ''}"></i>`;
     el.innerHTML = html;
   }
   setVitals(player) {
@@ -48,9 +50,17 @@ export class Hud {
     $('arbar').firstElementChild.style.width = `${Math.min(100, player.armour)}%`;
     $('money').textContent = `$${player.money.toLocaleString()}`;
     $('prole').textContent = player.team === 'def' ? 'DOCKERS — DEFEND' : 'RUNNERS — ATTACK';
-    $('objective').textContent = player.team === 'def'
-      ? 'Hold the sites. Defuse the charge if it is planted.'
-      : 'Plant the charge at Site A or Site B, then defend it.';
+    $('chargeChip').classList.toggle('hidden', !player.carrier);
+  }
+  // The objective line: what you should be doing right now, not just your role.
+  setObjective(text) { $('objective').textContent = text; }
+  // The zone under the minimap: where you are standing, by name.
+  setZone(name) { const el = $('zoneName'); if (el) el.textContent = name; }
+  // Buy header: the countdown, the round and the score, above the shop.
+  setBuyHead(round, maxRounds, def, atk, team, timer) {
+    const el = $('buyHead');
+    if (!el) return;
+    el.innerHTML = `BUY <b>${this.fmtTime(timer)}</b> · ROUND ${round} / ${maxRounds} · DOCKERS ${def} — ${atk} RUNNERS · YOU: ${team === 'def' ? 'DOCKERS' : 'RUNNERS'}`;
   }
   setWeapon(player) {
     const w = player.weapon();
@@ -68,7 +78,7 @@ export class Hud {
     $('slots').innerHTML = slots;
     const g = player.grenades;
     $('nades').innerHTML =
-      `FRAG <b>${g.frag}</b> [4] · FLASH <b>${g.flash}</b> [5] · SMOKE <b>${g.smoke}</b> [6] · IGNIS <b>${g.fire || 0}</b> [7]` +
+      `FRAG <b>${g.frag}</b> [4] · FLASH <b>${g.flash}</b> [5] · SMOKE <b>${g.smoke}</b> [6] · IGNIS <b>${g.fire || 0}</b> [7] · FLARE <b>${g.flare || 0}</b> [8]` +
       (player.hasKit ? ` · <b style="color:#7cc8ff">DEFUSE KIT</b>` : '') +
       (player.helmet ? ` · <b style="color:#7cc8ff">HELM</b>` : '');
   }
@@ -189,6 +199,16 @@ export class Hud {
     while (this.callItems.length > 4) this.callItems.shift().remove();
     setTimeout(() => div.remove(), 7000);
   }
+  // Radio: a teammate's line with their role, in the same panel as callouts.
+  radio(name, role, text) {
+    const div = document.createElement('div');
+    div.className = 'radio';
+    div.innerHTML = `[RADIO] <b>${name} (${role}):</b> ${text}`;
+    this.callEl.prepend(div);
+    this.callItems.push(div);
+    while (this.callItems.length > 5) this.callItems.shift().remove();
+    setTimeout(() => div.remove(), 9000);
+  }
   // Minimap: quay outline, water edge, container blocks, site zones with letters,
   // the player as a white wedge, teammates teal, enemies only when seen, the bomb
   // carrier with a yellow dot and the planted charge blinking.
@@ -240,25 +260,26 @@ export class Hud {
   buildShop() {
     const shop = $('shop');
     const cat = (title) => `<div class="cat">${title}</div>`;
-    const item = (key, label, sub, price, kind) =>
-      `<div class="item" data-key="${key}" data-kind="${kind}"><span>${label}<br><span class="k">${sub}</span></span><b>$${price.toLocaleString()}</b></div>`;
+    let n = 0;
+    const item = (key, label, sub, flavour, price, kind) =>
+      `<div class="item" data-key="${key}" data-kind="${kind}"><span class="num">${++n}</span><span class="grow">${label}<br><span class="k">${sub}</span>${flavour ? ` <span class="fl">· ${flavour}</span>` : ''}</span><b>$${price.toLocaleString()}</b></div>`;
     const w = (id) => {
       const d = WEAPONS[id];
-      return item(id, d.name, `${d.mode} · ${d.mag} rounds`, d.price, 'weapon');
+      return item(id, d.name, `${d.mode} · ${d.mag} rounds`, FLAVOUR[id] || '', d.price, 'weapon');
     };
     shop.innerHTML =
       cat('PISTOLS') + w('revolver') +
-      item('p9', 'P9 SIDEARM', 'SEMI · 9MM · 12 rounds · owned', 0, 'weapon') +
+      item('p9', 'P9 SIDEARM', 'SEMI · 9MM · 12 rounds · owned', FLAVOUR.p9, 0, 'weapon') +
       cat('SMGs') + w('smg') +
       cat('RIFLES') + w('carbine') + w('dmr') + w('scoped') +
       cat('HEAVY') + w('shotgun') + w('lmg') +
       cat('GEAR') +
-      item('armour', 'KEVLAR + HELM', 'Halves body damage · helm halves headshots', ARMOUR_PRICE, 'armour') +
-      item('kit', 'DEFUSE KIT', 'Defuse in half the time (Dockers)', KIT_PRICE, 'kit') +
+      item('armour', 'KEVLAR + HELM', 'Halves body damage · helm halves headshots', 'Vest — absorbs half of every hit', ARMOUR_PRICE, 'armour') +
+      item('kit', 'DEFUSE KIT', 'Defuse in half the time (Dockers)', 'Half the defuse, twice the nerve', KIT_PRICE, 'kit') +
       cat('GRENADES') +
-      ['frag', 'flash', 'smoke', 'fire'].map((id) => {
+      ['frag', 'flash', 'smoke', 'fire', 'flare'].map((id) => {
         const g = GRENADES[id];
-        return item(id, `${g.name} GRENADE`, `Throw with key ${g.key}${id === 'fire' ? ' · 7s fire zone' : ''}`, g.price, 'grenade');
+        return item(id, `${g.name} GRENADE`, `Throw with key ${g.key}`, g.flavour, g.price, 'grenade');
       }).join('');
   }
   showBuy(money) { $('buyMoney').textContent = `$${money.toLocaleString()}`; $('buy').classList.remove('hidden'); }

@@ -18,12 +18,6 @@ const BOT_WEAPONS = ['carbine', 'smg', 'carbine', 'shotgun', 'scoped'];
 // the sidearm and save — an eco round, same as a human would play.
 const BOT_BUY_LADDER = ['carbine', 'dmr', 'smg', 'shotgun', 'lmg', 'scoped'];
 
-function laneName(x, z) {
-  const lane = x < -10 ? 'west lane' : x > 10 ? 'east lane' : 'mid lane';
-  const side = z < -7 ? 'north' : z > 7 ? 'south' : '';
-  return side ? `${lane} ${side}` : lane;
-}
-
 export class Bot {
   constructor(map, scene, rng, id, team, name) {
     this.map = map; this.scene = scene; this.rng = rng;
@@ -46,8 +40,9 @@ export class Bot {
     this.aimErr = 0.030;
     this.holdUntil = 0;
     this.destSite = 'A';
-    this.hasSmoked = false; this.hasFlashed = false; this.hasFired = false;
-    this.calledOut = false;
+    this.planVia = null; this.viaDone = false; // flank route for the team plan
+    this.hasSmoked = false; this.hasFlashed = false; this.hasFired = false; this.hasFlared = false;
+    this.calledOut = false; this.calledRotate = false;
     this.speed = 3.4;
     this.strafeDir = 1; this.strafeUntil = 0;
     this.grenades = { frag: 1, flash: 1, smoke: 1, fire: 0 };
@@ -74,7 +69,7 @@ export class Bot {
     if (this.team === 'def' && budget >= 400 && this.rng() < 0.5) {
       budget -= 400; this.hasKit = true;
     }
-    this.grenades = { frag: 1, flash: 1, smoke: 1, fire: budget >= 400 && this.rng() < 0.45 ? 1 : 0 };
+    this.grenades = { frag: 1, flash: 1, smoke: 1, fire: budget >= 400 && this.rng() < 0.45 ? 1 : 0, flare: this.rng() < 0.4 ? 1 : 0 };
     this.money = budget;
   }
   // Halftime side swap: same bot, other side — recolour the uniform and tag.
@@ -153,8 +148,9 @@ export class Bot {
     this.weapon = this.freshWeapon(weaponId || BOT_WEAPONS[this.id % BOT_WEAPONS.length]);
     this.state = 'patrol'; this.path = []; this.pathIdx = 0;
     this.target = null; this.lastSeen = null; this.seenAt = -10;
-    this.burstLeft = 0; this.nextShotAt = 0; this.hasSmoked = false; this.hasFlashed = false; this.hasFired = false;
-    this.calledOut = false; this.grenades = { frag: 1, flash: 1, smoke: 1, fire: 0 };
+    this.burstLeft = 0; this.nextShotAt = 0; this.hasSmoked = false; this.hasFlashed = false; this.hasFired = false; this.hasFlared = false;
+    this.calledOut = false; this.calledRotate = false; this.planVia = null; this.viaDone = false;
+    this.grenades = { frag: 1, flash: 1, smoke: 1, fire: 0, flare: 0 };
     this.holdUntil = 0;
   }
   setPath(path) { this.path = path; this.pathIdx = 0; }
@@ -178,7 +174,7 @@ export class Bot {
       this.seenAt = now;
       if (!this.calledOut && enemy.isPlayer) {
         this.calledOut = true;
-        w.callout(this, `contact ${laneName(enemy.pos.x, enemy.pos.z)}!`);
+        w.radioContact(this, enemy);
       }
       this.state = 'engage';
     } else if (this.target && now - this.seenAt > 1.6) {
@@ -193,7 +189,10 @@ export class Bot {
     if (this.team === 'def' && w.bomb.state === 'planted' && !this.target) {
       const d = Math.hypot(this.pos.x - w.bomb.x, this.pos.z - w.bomb.z);
       if (d < 2.2) { this.state = 'defuse'; w.botDefuse(this, dt); return; }
-      if (this.state !== 'rotate') { this.state = 'rotate'; this.setPath(this.map.findPath(this.pos.x, this.pos.z, w.bomb.x, w.bomb.z)); }
+      if (this.state !== 'rotate') {
+        this.state = 'rotate'; this.setPath(this.map.findPath(this.pos.x, this.pos.z, w.bomb.x, w.bomb.z));
+        if (!this.calledRotate) { this.calledRotate = true; w.radioRotate(this, w.bomb.site); }
+      }
     }
     // --- behaviour by state.
     if (this.state === 'engage' && this.target) { this.fight(dt, now, w); return; }
@@ -229,6 +228,15 @@ export class Bot {
             w.botThrowFire(this, site.x + (this.rng() - 0.5) * 4, site.z + (this.rng() - 0.5) * 4);
           }
         }
+        // And light the site mouth with a flare when pushing in.
+        if (this.team === 'atk' && !this.hasFlared && this.grenades.flare > 0) {
+          const site = w.siteByName(this.destSite);
+          const ds = Math.hypot(this.pos.x - site.x, this.pos.z - site.z);
+          if (ds < 12 && ds > 5 && this.rng() < 0.5) {
+            this.hasFlared = true; this.grenades.flare--;
+            w.botThrowFlare(this, site.x, site.z);
+          }
+        }
       }
       this.faceAlongPath();
     } else {
@@ -245,6 +253,12 @@ export class Bot {
   pickJob(now, w) {
     const r = this.rng();
     if (this.team === 'atk') {
+      // A flanker takes the Mid Arch route first, then rejoins the site push.
+      if (this.planVia && !this.viaDone) {
+        this.viaDone = true; this.state = 'push';
+        this.setPath(this.map.findPath(this.pos.x, this.pos.z, this.planVia.x, this.planVia.z));
+        return;
+      }
       // Attackers commit to a site as a group; the carrier goes first.
       if (this.carrier || r < 0.55) {
         const site = w.siteByName(this.destSite);

@@ -1,13 +1,15 @@
-// Quay 7 palette: one golden-hour look, kept in a single place so the map, the HUD
-// and the bot uniforms all agree. Warm sun, teal water, rust-orange containers.
+// Quay 7 palette: a dusk look now — the sun has dropped toward the harbour,
+// the sky runs purple to orange and the fog carries the warmth. Kept in a
+// single place so the map, the HUD and the bot uniforms all agree. Warm sun,
+// teal water, rust-orange containers.
 export const PAL = {
-  sun: 0xffd9a0,        // low golden sun
-  skyTop: 0x7fb4d8,     // pale blue overhead
-  skyLow: 0xffc98a,     // warm haze at the horizon
-  fog: 0xf2c98d,
-  water: 0x2e7f8c,
-  quay: 0x9a938a,       // sun-bleached concrete
-  quayDark: 0x7d766d,
+  sun: 0xffb066,        // low dusk sun
+  skyTop: 0x6a4a72,     // purple overhead
+  skyLow: 0xff9a5a,     // orange haze at the horizon
+  fog: 0x9a6a5a,
+  water: 0x2a5a66,
+  quay: 0x8f8578,       // sun-bleached concrete, warmed by dusk
+  quayDark: 0x746a5e,
   asphalt: 0x6b655c,
   rust: 0xb4552d,        // rust-orange containers
   rustDark: 0x8f3f20,

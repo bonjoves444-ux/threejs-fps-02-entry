@@ -17,6 +17,8 @@
   #minimap { display:block; width:196px; height:132px; border-radius:4px; background:#101c22; }
   #maplabel { display:flex; justify-content:space-between; margin-top:6px; font-size:11px; letter-spacing:.08em; color:#cfe3ea; }
   #maplabel b { color:var(--amber); }
+  #zonelabel { margin-top:6px; font-size:11px; letter-spacing:.08em; color:#cfe3ea; text-align:right; }
+  #zonelabel b { color:var(--amber); }
   /* --- top centre score --- */
   #scorebar { position:absolute; top:14px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:14px; padding:7px 18px; font-size:13px; }
   #scorebar .team { font-weight:800; letter-spacing:.06em; font-size:13px; }
@@ -25,6 +27,7 @@
   #scorebar .mid { text-align:center; }
   #scorebar .timer { font-size:20px; font-weight:900; font-variant-numeric:tabular-nums; }
   #scorebar .round { font-size:10px; letter-spacing:.14em; color:#9fb4bd; }
+  #scorebar .phase { font-size:10px; letter-spacing:.14em; color:var(--amber); }
   .pips { display:flex; gap:3px; justify-content:center; margin-top:2px; }
   .pips i { width:9px; height:5px; border-radius:2px; background:#33454e; }
   .pips i.won { background:var(--amber); }
@@ -38,6 +41,7 @@
   #vitals .who { font-size:11px; letter-spacing:.12em; color:#9fb4bd; }
   #vitals .who b { color:#fff; }
   #vitals .money { float:right; color:var(--amber); font-weight:800; font-size:15px; }
+  #chargeChip { color:#ffd700; font-weight:800; margin-left:6px; }
   .bar-row { display:flex; align-items:center; gap:10px; margin-top:7px; }
   .bar-row label { width:52px; font-size:10px; letter-spacing:.14em; color:#9fb4bd; }
   .bar { flex:1; height:12px; background:#1b2830; border-radius:3px; overflow:hidden; }
@@ -81,6 +85,7 @@
   #callouts { position:absolute; left:14px; bottom:150px; width:340px; font-size:12px; }
   #callouts div { margin-top:4px; padding:4px 9px; background:rgba(8,12,16,.66); border-left:3px solid var(--teal); border-radius:4px; }
   #callouts div.atk { border-left-color:var(--orange); }
+  #callouts div.radio { border-left-color:var(--amber); background:rgba(20,16,8,.66); }
   /* --- overlays: menu / buy / scores / pause --- */
   .overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(5,9,12,.55); pointer-events:auto; }
   .card { width:640px; max-width:92vw; background:rgba(8,13,17,.94); border:1px solid var(--line); border-radius:12px; padding:28px 32px; box-shadow:0 20px 60px rgba(0,0,0,.6); }
@@ -96,18 +101,26 @@
   .ctrls { display:grid; grid-template-columns:1fr 1fr; gap:5px 22px; font-size:12.5px; color:#cfe3ea; }
   .ctrls b { color:var(--amber); }
   .foot { margin-top:16px; font-size:11px; color:#7d939e; letter-spacing:.06em; }
-  #buy .card { width:720px; }
-  .shop { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:12px; }
-  .item { display:flex; justify-content:space-between; padding:9px 12px; border:1px solid var(--line); border-radius:6px; font-size:13px; cursor:pointer; }
+  #buy .card { width:720px; max-height:94vh; overflow-y:auto; padding:14px 28px; }
+  #buy .card h2 { font-size:20px; margin-bottom:6px; }
+  #buy .card .sub { margin:6px 0 8px; }
+  .shop { display:grid; grid-template-columns:1fr 1fr; gap:5px; margin-top:8px; }
+  .item { display:flex; justify-content:space-between; padding:4px 10px; border:1px solid var(--line); border-radius:6px; font-size:12px; cursor:pointer; }
   .item:hover { border-color:var(--amber); }
   .item b { color:var(--amber); }
   .item .k { color:#7d939e; font-size:11px; }
+  .item .num { color:var(--amber); font-weight:800; margin-right:8px; }
+  .item .grow { flex:1; }
+  .item .fl { display:inline; font-size:11px; color:#b9cdd6; font-style:italic; }
+  .buyhead { font-size:13px; letter-spacing:.1em; color:#cfe3ea; margin-top:6px; }
+  .buyhead b { color:var(--amber); }
   #scores .card { width:560px; }
   #scores table { width:100%; border-collapse:collapse; font-size:13px; margin-top:8px; }
   #scores td, #scores th { padding:5px 6px; text-align:right; border-bottom:1px solid rgba(255,255,255,.07); }
   #scores td:first-child, #scores th:first-child { text-align:left; }
   #scores .me { color:var(--amber); font-weight:800; }
   #scores .mvp { color:var(--amber); }
+  #scores .role { color:#9fb4bd; font-size:12px; }
   #roundhist { display:flex; gap:3px; margin-top:10px; flex-wrap:wrap; }
   #roundhist i { width:16px; height:16px; font-size:10px; font-style:normal; font-weight:900; line-height:16px; text-align:center; border-radius:3px; background:#33454e; color:#fff; }
   #roundhist i.w { background:#37d67a; } #roundhist i.l { background:#ff6b61; }
@@ -137,7 +150,7 @@
   .srow label { color:#cfe3ea; letter-spacing:.06em; }
   .srow input[type=range] { width:220px; accent-color:var(--amber); }
   .srow select { background:#16222a; color:#fff; border:1px solid var(--line); border-radius:4px; padding:4px 8px; }
-  .shop .cat { grid-column:1 / -1; font-size:11px; letter-spacing:.16em; color:var(--amber); margin-top:6px; }
+  .shop .cat { grid-column:1 / -1; font-size:11px; letter-spacing:.16em; color:var(--amber); margin-top:2px; }
   .hidden { display:none !important; }
   #err { position:absolute; left:14px; top:170px; color:#ff6b61; font-size:12px; max-width:420px; }
 </style>
@@ -150,18 +163,19 @@
   <div class="hud" id="hud">
     <div class="panel" id="mapbox"><canvas id="minimap" width="392" height="264"></canvas>
       <div id="maplabel"><span>QUAY 7 — FERRY TERMINAL</span><span><b>SITE A</b> · BERTH &nbsp; <b>SITE B</b> · YARD</span></div>
+      <div id="zonelabel">QUAY 7 — <b id="zoneName">MID ARCH</b></div>
     </div>
     <div class="panel" id="scorebar">
       <span class="team def">DOCKERS</span><span class="num" id="scoreDef">0</span>
       <span class="pips" id="pipsDef"></span>
-      <span class="mid"><span class="timer" id="timer">1:45</span><br><span class="round" id="roundLbl">ROUND 1 / 17</span></span>
+      <span class="mid"><span class="timer" id="timer">1:45</span><br><span class="round" id="roundLbl">ROUND 1 / 12</span><br><span class="phase" id="phaseLbl">BUY</span></span>
       <span class="pips" id="pipsAtk"></span>
       <span class="num" id="scoreAtk">0</span><span class="team atk">RUNNERS</span>
     </div>
     <div id="bombbar" class="hidden"><div class="track"><i id="bombFill"></i></div><div id="bombLbl"></div></div>
     <div id="feed"></div>
     <div class="panel" id="vitals">
-      <div class="who"><b id="pname">YOU</b> · <span id="prole">DOCKERS — DEFEND</span><span class="money" id="money">$800</span></div>
+      <div class="who"><b id="pname">YOU</b> · <span id="prole">DOCKERS — DEFEND</span><span id="chargeChip" class="hidden">■ CHARGE</span><span class="money" id="money">$800</span></div>
       <div class="bar-row"><label>HEALTH</label><div class="bar" id="hpbar"><i></i></div><span class="val" id="hp">100</span></div>
       <div class="bar-row"><label>KEV · HELM</label><div class="bar" id="arbar"><i></i></div><span class="val" id="ar">0</span></div>
       <div id="objective">Hold the sites. Defuse the charge if it is planted.</div>
@@ -187,7 +201,7 @@
       <p class="sub">A round-based tactical FPS on a golden-hour ferry quay. Two teams of five fight over two
       charge sites — the <b style="color:var(--teal)">Dockers</b> hold the terminal, the <b style="color:var(--orange)">Runners</b> plant the
       charge at Site A (Ferry Berth) or Site B (Container Yard). Win rounds by elimination or by the objective,
-      earn money, buy better guns. First to 9 rounds takes the match. Stopping to aim pays — spraying on the
+      earn money, buy better guns. First to 7 rounds takes the match. Stopping to aim pays — spraying on the
       run does not. Headshots pay more.</p>
       <div class="teamrow">
         <button id="btnDef">PLAY AS DOCKERS<small>Defend — hold the sites, defuse</small></button>
@@ -198,7 +212,7 @@
         <div><b>Quiet walk</b> Shift — silent steps, steadier aim</div>
         <div><b>Fire</b> Mouse · <b>Aim</b> right mouse (rifles zoom)</div>
         <div><b>Reload</b> R · <b>Weapons</b> 1 / 2 / wheel · <b>Knife</b> 3 or V</div>
-        <div><b>Grenades</b> 4 frag · 5 flash · 6 smoke · 7 Ignis fire</div>
+        <div><b>Grenades</b> 4 frag · 5 flash · 6 smoke · 7 Ignis fire · 8 flare</div>
         <div><b>Plant / defuse</b> hold E at the site</div>
         <div><b>Buy</b> B during the buy phase · <b>Scores</b> Tab</div>
         <div><b>Inspect</b> F · <b>Pause</b> Esc · <b>Restart match</b> from pause</div>
@@ -212,9 +226,8 @@
   <div class="overlay hidden" id="buy">
     <div class="card">
       <h2>BUY PHASE — <span id="buyMoney" style="color:var(--amber)">$800</span></h2>
-      <p class="sub" style="margin:0">Spend the round's money before the gate opens. Click an item or press its key.</p>
+      <div id="buyHead" class="buyhead"></div>
       <div class="shop" id="shop"></div>
-      <div class="foot">B closes the shop · your loadout carries into the round · armour and kit stay bought</div>
     </div>
   </div>
   <div class="overlay hidden" id="scores">

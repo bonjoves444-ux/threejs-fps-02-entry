@@ -10,6 +10,9 @@
 // 60 Hz step, decoupled from rendering, with the frame delta clamped so a hitch
 // can never teleport a player through a wall.
 import * as THREE from 'three';
+import { zoneAt } from './zones.js';
+import { Radio, ROLE_FOR } from './radio.js';
+import { FlareManager } from './flare.js';
 import { QuayMap, MAP } from './map.js';
 import { QuayProps } from './props.js';
 import { Player } from './player.js';
@@ -31,9 +34,9 @@ const BUY_TIME = 15; // freeze / buy time: shop, then the gate opens
 const PLANT_TIME = 3.5;
 const DEFUSE_TIME = 5;
 const BOMB_TIME = 40;
-const WIN_ROUNDS = 9;
-const MAX_ROUNDS = 17;
-const HALFTIME_ROUND = 9; // sides swap after round 8
+const WIN_ROUNDS = 7;
+const MAX_ROUNDS = 12;
+const HALFTIME_ROUND = 7; // sides swap after round 6
 
 const params = new URLSearchParams(location.search);
 const SHOT = params.get('shot'); // start | play | buy | plant — staged scenes for screenshots
@@ -47,6 +50,7 @@ export class Game {
     this.rng = mulberry32(SEED);
     this.sfx = new Sfx();
     this.hud = new Hud();
+    this.radio = new Radio(this.hud);
     this.time = 0;            // game clock, seconds
     this.phase = 'menu';      // menu | buy | round | roundEnd | matchEnd
     this.round = 1;
@@ -86,13 +90,13 @@ export class Game {
     this.renderer.domElement.className = 'webgl';
     app.prepend(this.renderer.domElement);
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x9cc4de);
+    this.scene.background = new THREE.Color(0x6b3a4a); // dusk: purple-rose sky
     this.scene.fog = new THREE.Fog(PAL.fog, 45, 150);
     this.camera = new THREE.PerspectiveCamera(74, window.innerWidth / window.innerHeight, 0.08, 400);
     this.scene.add(this.camera);
-    // Golden-hour light: warm sun low over the water to the west, cool sky fill,
-    // and a soft warm bounce from the east so shaded faces never go flat grey.
-    const hemi = new THREE.HemisphereLight(0xbfd9e8, 0x8a7a5e, 1.05);
+    // Dusk light: a low orange sun over the water, a purple sky fill, and a
+    // soft warm bounce from the east so shaded faces never go flat grey.
+    const hemi = new THREE.HemisphereLight(0x9a7ab8, 0x7a5a44, 1.0);
     this.scene.add(hemi);
     const sun = new THREE.DirectionalLight(PAL.sun, 2.4);
     sun.position.set(-45, 26, -12);
@@ -103,7 +107,7 @@ export class Game {
     // Sun disc hanging over the harbour, and a pale sky dome gradient is faked by
     // the background colour plus fog; the disc sells the hour at a glance.
     const disc = new THREE.Mesh(new THREE.CircleGeometry(7, 32),
-      new THREE.MeshBasicMaterial({ color: 0xffe9bb, fog: false }));
+      new THREE.MeshBasicMaterial({ color: 0xffb066, fog: false }));
     disc.position.set(-120, 34, -40); disc.lookAt(0, 10, 0);
     this.scene.add(disc);
     this.map = new QuayMap(this.scene);
@@ -111,6 +115,26 @@ export class Game {
     window.__quayColliders = this.map.colliders; // minimap reads the same boxes
     this.effects = new Effects(this.scene);
     this.fireZones = new FireZones(this.scene);
+    this.flares = new FlareManager(this.scene);
+    // The charge itself: a yellow box with a blinking red light, visible on the
+    // ground when dropped or planted so players can find it and pick it up.
+    this.chargeMesh = new THREE.Group();
+    const chargeBox = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.22, 0.3),
+      new THREE.MeshLambertMaterial({ color: 0xffc400 }));
+    chargeBox.position.y = 0.11; this.chargeMesh.add(chargeBox);
+    const chargeStripe = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.06, 0.32),
+      new THREE.MeshBasicMaterial({ color: 0x111111 }));
+    chargeStripe.position.y = 0.14; this.chargeMesh.add(chargeStripe);
+    this.chargeLight = new THREE.Mesh(new THREE.SphereGeometry(0.05, 8, 8),
+      new THREE.MeshBasicMaterial({ color: 0xff3b30 }));
+    this.chargeLight.position.set(0.14, 0.26, 0); this.chargeMesh.add(this.chargeLight);
+    // A soft beacon pillar above the charge so a dropped charge reads at a
+    // glance, even at small size or through a gap between containers.
+    const beacon = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 1.5, 12, 1, true),
+      new THREE.MeshBasicMaterial({ color: 0xffc400, transparent: true, opacity: 0.22, side: THREE.DoubleSide, depthWrite: false }));
+    beacon.position.y = 0.85; this.chargeMesh.add(beacon);
+    this.chargeMesh.visible = false;
+    this.scene.add(this.chargeMesh);
     this.player = new Player(this.map, this.sfx, this.camera);
     this.spectator = new Spectator(this.camera);
     this.settings = new Settings();
@@ -118,11 +142,14 @@ export class Game {
     const applySettings = () => this.settings.apply(this.player, this.sfx, this.hud, this.renderer);
     this.settings.buildPanel(document.getElementById('pauseSettings'), applySettings);
     this.settings.buildPanel(document.getElementById('menuSettings'), applySettings);
-    // Nine bots fill the other nine slots of a 5v5.
+    // Nine bots fill the other nine slots of a 5v5. Each bot has a role, shown
+    // in radio lines and on the scoreboard.
     this.bots = [];
     const defNames = [...DOCKER_NAMES], atkNames = [...RUNNER_NAMES];
     for (let i = 0; i < 4; i++) this.bots.push(new Bot(this.map, this.scene, this.rng, i, 'def', defNames[i]));
     for (let i = 0; i < 5; i++) this.bots.push(new Bot(this.map, this.scene, this.rng, 4 + i, 'atk', atkNames[i]));
+    for (const b of this.bots) b.role = ROLE_FOR[b.name] || 'Support';
+    this.player.role = 'Anchor';
     this.actors = [this.player, ...this.bots];
     window.addEventListener('resize', () => {
       this.camera.aspect = window.innerWidth / window.innerHeight;
@@ -150,6 +177,7 @@ export class Game {
       if (e.code === 'Digit5') this.throwGrenade('flash');
       if (e.code === 'Digit6') this.throwGrenade('smoke');
       if (e.code === 'Digit7') this.throwGrenade('fire');
+      if (e.code === 'Digit8') this.throwGrenade('flare');
       if (e.code === 'KeyE') this.interactHeld = true;
       if (e.code === 'Escape') this.togglePause();
       if (e.code === 'Enter' && this.phase === 'menu') this.startMatch('def');
@@ -221,14 +249,15 @@ export class Game {
     this.player.money = START_MONEY;
     this.player.slots = { primary: null, secondary: this.player.freshWeapon('p9'), melee: this.player.freshWeapon('knife') };
     this.player.slot = 'secondary';
-    this.player.grenades = { frag: 0, flash: 0, smoke: 0, fire: 0 };
+    this.player.grenades = { frag: 0, flash: 0, smoke: 0, fire: 0, flare: 0 };
+    this.player.carrier = false;
     this.player.armour = 0; this.player.helmet = false; this.player.hasKit = false;
     this.player.buildViewmodel();
     this.hud.hideMenu(); this.hud.hidePause();
     this.sfx.ensure(); this.sfx.startAmbient();
     this.startRound();
   }
-  // Halftime: after round 8 the sides swap — Dockers attack, Runners defend —
+  // Halftime: after round 6 the sides swap — Dockers attack, Runners defend —
   // and the loss bonuses reset, same as a real half.
   swapSides() {
     this.swapped = true;
@@ -257,8 +286,10 @@ export class Game {
     // Bomb: carried by the player when attacking, else by a random attacker bot.
     const attackers = this.bots.filter((b) => b.team === 'atk');
     for (const b of this.bots) b.carrier = false;
+    this.player.carrier = false;
     if (this.player.team === 'atk') {
       this.bomb.state = 'carried'; this.bomb.carrier = this.player;
+      this.player.carrier = true;
     } else {
       const carrier = attackers[Math.floor(this.rng() * attackers.length)];
       carrier.carrier = true;
@@ -282,6 +313,13 @@ export class Game {
     }
     // Face the attackers toward the quay, the defenders toward the gate.
     this.player.yaw = this.player.team === 'atk' ? Math.PI / 2 : -Math.PI / 2;
+    // Team plan: two attackers flank through Mid Arch, the rest push the site
+    // mouth; the radio line IS the plan, and the flankers really take that route.
+    const flankers = attackers.filter((b) => !b.carrier).slice(0, 2);
+    for (const b of flankers) b.planVia = { x: 2, z: -4 };
+    this.radio.plan(attackers, site, flankers);
+    this.radio.holdPlan(this.bots.filter((b) => b.team === 'def'));
+    this.player.role = this.player.team === 'atk' ? (this.player.carrier ? 'Entry' : 'Support') : 'Anchor';
     this.hud.showBuy(this.player.money);
     const matchPoint = this.scoreDef === WIN_ROUNDS - 1 || this.scoreAtk === WIN_ROUNDS - 1;
     this.hud.banner(matchPoint ? `MATCH POINT — ROUND ${this.round}` : `ROUND ${this.round} — BUY PHASE`,
@@ -423,6 +461,8 @@ export class Game {
     const muzzle = eye.clone().addScaledVector(fwd, 0.6);
     muzzle.y -= 0.12;
     this.effects.muzzle(muzzle);
+    const right = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 0);
+    this.effects.casing(muzzle, right);
     const spread = p.currentSpread();
     const pellets = w.def.pellets || 1;
     for (let i = 0; i < pellets; i++) {
@@ -451,7 +491,10 @@ export class Game {
     // The charge drops where its carrier falls; an attacker picks it up again.
     if (victim === this.bomb.carrier) {
       this.bomb.state = 'dropped'; this.bomb.x = victim.pos.x; this.bomb.z = victim.pos.z;
-      this.bomb.carrier = null;
+      this.bomb.carrier = null; victim.carrier = false;
+      this.hud.banner('CHARGE DROPPED', 'The charge is on the ground — pick it up', 2.5);
+      const mate = this.bots.find((b) => b.team === 'atk' && b.alive);
+      if (mate) this.radio.drop(mate, zoneAt(victim.pos.x, victim.pos.z));
     }
     // Deathcam: the player spectates a living teammate.
     if (victim === this.player) this.spectator.start(this.player, this.actors);
@@ -509,6 +552,10 @@ export class Game {
       this.fireZones.ignite(pos.x, pos.z);
       this.sfx.fireCrackle();
       this.hud.addFeed(`<span class="hs">IGNIS</span> — fire zone lit`);
+    } else if (g.kind === 'flare') {
+      // Flare: a bright light that hangs over the push for 8 seconds.
+      this.flares.light(pos.x, pos.y, pos.z);
+      this.sfx.flarePop();
     } else {
       // Smoke: three puffs that hang for 14 seconds and block sight for everyone.
       for (let i = 0; i < 3; i++) {
@@ -536,11 +583,35 @@ export class Game {
 
   scoreboardHtml() {
     const rows = [...this.actors].sort((a, b) => b.kills - a.kills || a.deaths - b.deaths);
-    let html = '<table><tr><th>PLAYER</th><th>TEAM</th><th>K</th><th>D</th><th>DMG</th><th>$</th><th>MVP</th></tr>';
+    let html = '<table><tr><th>PLAYER</th><th>ROLE</th><th>TEAM</th><th>K</th><th>D</th><th>DMG</th><th>$</th><th>MVP</th></tr>';
     for (const a of rows) {
-      html += `<tr class="${a === this.player ? 'me' : ''}"><td>${a.name}${a.carrier ? ' ●' : ''}</td><td>${a.team === 'def' ? 'DOCKERS' : 'RUNNERS'}</td><td>${a.kills}</td><td>${a.deaths}</td><td>${Math.round(a.damageDealt || 0)}</td><td>$${(a.money || 0).toLocaleString()}</td><td class="mvp">${a === this.lastMvp ? '★' : ''}</td></tr>`;
+      html += `<tr class="${a === this.player ? 'me' : ''}"><td>${a.name}${a.carrier ? ' ●' : ''}</td><td class="role">${a.role || ''}</td><td>${a.team === 'def' ? 'DOCKERS' : 'RUNNERS'}</td><td>${a.kills}</td><td>${a.deaths}</td><td>${Math.round(a.damageDealt || 0)}</td><td>$${(a.money || 0).toLocaleString()}</td><td class="mvp">${a === this.lastMvp ? '★' : ''}</td></tr>`;
     }
     return html + '</table>';
+  }
+
+  // What the player should be doing right now, in one line.
+  objectiveText() {
+    const p = this.player;
+    if (this.phase !== 'round' || !p.alive) {
+      return p.team === 'def'
+        ? 'Hold the sites. Defuse the charge if it is planted.'
+        : 'Plant the charge at Site A or Site B, then defend it.';
+    }
+    if (this.bomb.state === 'planted') {
+      return p.team === 'def'
+        ? `Defuse the charge at Site ${this.bomb.site} — ${Math.ceil(this.bomb.timer)}s left!`
+        : `Defend the planted charge at Site ${this.bomb.site}.`;
+    }
+    if (p.team === 'atk') {
+      if (this.bomb.carrier === p) return 'You carry the charge — take it to A or B';
+      if (this.bomb.state === 'dropped') return 'The charge is down — pick it up and plant it';
+      const c = this.bomb.carrier;
+      return c ? `Follow ${c.name} to Site ${c.destSite || 'A'}` : 'Take a site and plant the charge';
+    }
+    return this.bomb.state === 'dropped'
+      ? 'The charge is down — guard it until the round ends'
+      : 'Hold the sites. Defuse the charge if it is planted.';
   }
 
   // ---------- the bot world: what bots ask the game for ----------
@@ -569,6 +640,19 @@ export class Game {
     return best;
   }
   callout(bot, text) { this.hud.callout(bot.name, text, bot.team); }
+  // A bot that sees the player radios it with their role and the zone name,
+  // and a count of how many enemies it can actually see.
+  radioContact(bot, enemy) {
+    let count = 0;
+    const eye = bot.eyePos(new THREE.Vector3());
+    for (const a of this.actors) {
+      if (a.team === bot.team || !a.alive) continue;
+      const chest = new THREE.Vector3(a.pos.x, a.pos.y + 1.2, a.pos.z);
+      if (this.losClear(eye.x, eye.y, eye.z, chest.x, chest.y, chest.z)) count++;
+    }
+    this.radio.contact(bot, zoneAt(enemy.pos.x, enemy.pos.z), Math.max(1, count));
+  }
+  radioRotate(bot, site) { this.radio.rotate(bot, site); }
   botShoot(bot, target, err) {
     const eye = bot.eyePos(new THREE.Vector3());
     const chest = new THREE.Vector3(target.pos.x, target.pos.y + 1.15, target.pos.z);
@@ -585,6 +669,8 @@ export class Game {
     const muzzle = eye.clone(); muzzle.y -= 0.1;
     this.effects.tracer(muzzle, hit.point, bot.weapon.def.tracer);
     this.effects.muzzle(muzzle);
+    const right = new THREE.Vector3(Math.cos(bot.yaw), 0, -Math.sin(bot.yaw));
+    this.effects.casing(muzzle, right);
     const dist = eye.distanceTo(chest);
     this.sfx.shot(bot.weapon.def.sound, dist);
   }
@@ -602,6 +688,10 @@ export class Game {
     this.sfx.fireCrackle();
     this.hud.callout(bot.name, 'Ignis out — that choke is burning!', bot.team);
   }
+  botThrowFlare(bot, x, z) {
+    this.grenadesFlying.push({ kind: 'flare', x, y: 1.6, z, vx: 0, vy: 0, vz: 0, t: 0, fuse: 0.4, fromPlayer: false });
+    this.hud.callout(bot.name, 'flare up — lighting the push!', bot.team);
+  }
   botPlant(bot, dt) {
     this.botPlantProg += dt / PLANT_TIME;
     this.hud.showProgress(`${bot.name.toUpperCase()} IS PLANTING THE CHARGE…`, this.botPlantProg);
@@ -613,6 +703,7 @@ export class Game {
       this.planter = bot;
       this.sfx.plant();
       this.hud.banner('CHARGE PLANTED', `Site ${this.bomb.site} — ${this.player.team === 'def' ? 'defuse it!' : 'defend it!'}`, 3);
+      this.radio.planted(this.bomb.site);
       this.hud.addFeed(`<span class="hs">CHARGE PLANTED</span> · SITE ${this.bomb.site}`);
       if (this.bomb.carrier === this.player) this.player.money += PLANT_MONEY;
       if (bot === this.bomb.carrier) bot.money += PLANT_MONEY;
@@ -716,6 +807,7 @@ export class Game {
             this.planter = p;
             p.money += PLANT_MONEY; this.sfx.plant();
             this.hud.banner('CHARGE PLANTED', `Site ${this.bomb.site} — defend it!`, 3);
+            this.radio.planted(this.bomb.site);
           }
         } else { this.plantProg = Math.max(0, this.plantProg - dt * 2); this.hud.hideProgress(); }
       } else if (p.team === 'def' && this.bomb.state === 'planted') {
@@ -751,9 +843,13 @@ export class Game {
     }
     // HUD.
     const phase = this.phase === 'buy' ? 'buy' : this.phase === 'round' ? 'round' : 'round';
+    const planted = this.bomb.state === 'planted';
     this.hud.setScore(this.scoreDef, this.scoreAtk, this.round, MAX_ROUNDS,
-      this.phase === 'buy' ? this.buyTimer : this.bomb.state === 'planted' ? this.bomb.timer : this.timer,
-      this.roundWinsDef, this.roundWinsAtk, phase);
+      this.phase === 'buy' ? this.buyTimer : planted ? this.bomb.timer : this.timer,
+      this.roundWinsDef, this.roundWinsAtk, phase, planted);
+    if (this.phase === 'buy') this.hud.setBuyHead(this.round, MAX_ROUNDS, this.scoreDef, this.scoreAtk, this.player.team, this.buyTimer);
+    this.hud.setZone(zoneAt(p.pos.x, p.pos.z));
+    this.hud.setObjective(this.objectiveText());
     this.hud.setBombBar(this.bomb.state === 'planted' ? this.bomb.timer / BOMB_TIME : null, this.bomb.timer, this.bomb.site);
     this.hud.setVitals(p);
     this.hud.setWeapon(p);
@@ -778,6 +874,14 @@ export class Game {
       else a.takeDamage(dmg, false, false);
       if (!a.alive) this.onKill(null, a, false, { name: 'IGNIS', id: 'IGNIS' });
     });
+    this.flares.update(dt, this.time);
+    // The charge on the ground: shown when dropped or planted, blinking red.
+    const showCharge = this.bomb.state === 'dropped' || this.bomb.state === 'planted';
+    this.chargeMesh.visible = showCharge;
+    if (showCharge) {
+      this.chargeMesh.position.set(this.bomb.x, 0, this.bomb.z);
+      this.chargeLight.material.color.setHex(Math.floor(this.time * 2) % 2 === 0 ? 0xff3b30 : 0x881111);
+    }
     this.props.update(dt, this.time);
     this.effects.update(dt);
   }
@@ -797,8 +901,9 @@ export class Game {
 
   // ---------- staged screenshot scenes ----------
   // ?shot= picks a frozen, fully-HUD'd moment so the screenshots are real renders
-  // of the game's own code: the menu, a mid-firefight, the buy phase, a plant,
-  // the scoreboard, and a look down the mid connector.
+  // of the game's own code: the menu, a firefight on the Site A pad, the buy
+  // phase, a plant, the scoreboard, a charge-dropped moment, and a look down
+  // the mid connector.
   stageShot(kind) {
     const stage = () => {
       if (kind === 'start') {
@@ -808,11 +913,12 @@ export class Game {
         this.hud.showMenu();
       } else if (kind === 'buy') {
         this.startMatch('def');
+        this.buyTimer = 11; // the shop's header reads BUY 0:11, like the leaders'
         this.round = 3; this.scoreDef = 2; this.scoreAtk = 1;
         this.player.money = 3850;
         this.player.buyWeapon('carbine');
         this.player.money = 3850;
-        this.player.grenades = { frag: 1, flash: 1, smoke: 1, fire: 1 };
+        this.player.grenades = { frag: 1, flash: 1, smoke: 1, fire: 1, flare: 1 };
         this.hud.showBuy(this.player.money);
         this.hud.bannerEl.style.display = 'none'; this.hud.bannerTimer = 0;
         // Face the ferry and the water so the shop's backdrop is bright, not a wall.
@@ -872,7 +978,7 @@ export class Game {
         this.player.buyWeapon('carbine');
         this.player.money = 4200;
         const w = this.player.weapon(); w.mag = 22; w.reserve = 75;
-        this.player.grenades = { frag: 1, flash: 1, smoke: 1, fire: 1 };
+        this.player.grenades = { frag: 1, flash: 1, smoke: 1, fire: 1, flare: 1 };
         const e1 = this.bots.find((b) => b.team === 'atk' && b.name === 'Vex');
         e1.resetSpawn(13.5, -6, Math.PI / 2, 'carbine', 50);
         e1.mesh.position.set(13.5, 0, -6); e1.mesh.rotation.y = Math.PI / 2;
@@ -885,42 +991,67 @@ export class Game {
         this.effects.tracer({ x: eye.x + 0.3, y: eye.y - 0.15, z: eye.z - 0.5 }, { x: 13.5, y: 1.2, z: -6 });
         this.camera.position.set(this.player.pos.x, 1.62, this.player.pos.z);
         this.camera.rotation.set(-0.02, this.player.yaw, 0, 'YXZ');
+      } else if (kind === 'event') {
+        // CHARGE DROPPED: the carrier fell in Mid Arch, the charge lies on the
+        // ground ahead, the banner and the objective line carry the moment.
+        this.startMatch('atk');
+        this.phase = 'round';
+        this.hud.hideBuy();
+        this.hud.bannerEl.style.display = 'none'; this.hud.bannerTimer = 0;
+        this.round = 5; this.scoreDef = 3; this.scoreAtk = 2; this.timer = 71;
+        this.roundWinsDef = 3; this.roundWinsAtk = 2;
+        this.player.resetSpawn(-3, 2, 0.71);
+        this.player.health = 100; this.player.armour = 50; this.player.money = 4200;
+        this.player.buyWeapon('carbine');
+        this.player.money = 4200;
+        const w = this.player.weapon(); w.mag = 22; w.reserve = 75;
+        this.player.grenades = { frag: 1, flash: 1, smoke: 1, fire: 1, flare: 1 };
+        // The carrier (Rook) is dead; the charge lies where he fell — in the
+        // open gap between the teal and rust containers, so it reads on camera.
+        this.bomb.state = 'dropped'; this.bomb.x = -6; this.bomb.z = -1.5; this.bomb.carrier = null;
+        this.player.carrier = false;
+        const rook = this.bots.find((b) => b.name === 'Rook');
+        rook.alive = false; rook.mesh.visible = false;
+        const e1 = this.bots.find((b) => b.team === 'def' && b.name === 'Kael');
+        e1.resetSpawn(-8, 0, -0.93, 'carbine', 50); e1.mesh.position.set(-8, 0, 0); e1.mesh.rotation.y = -0.93;
+        const e2 = this.bots.find((b) => b.team === 'def' && b.name === 'Mara');
+        e2.resetSpawn(-7, 1, -0.38, 'smg', 0); e2.mesh.position.set(-7, 0, 1); e2.mesh.rotation.y = -0.38;
+        this.camera.position.set(this.player.pos.x, 1.62, this.player.pos.z);
+        this.camera.rotation.set(-0.02, this.player.yaw, 0, 'YXZ');
       } else {
-        // play: mid-firefight cover — the denser map now: the overlook platform
-        // and stairs, an Ignis fire zone and smoke in mid, an enemy up on the
-        // overlook and one pushing the mid corridor, tracers and a full HUD.
-        // The camera looks east down the clear z=4 corridor, so the overlook,
-        // the fire and both enemies read in one frame.
+        // play: cover — the charge pad at Site A: the giant striped A underfoot,
+        // a flare burning over the bow ramp, two enemies on the site, a tracer
+        // and radio lines with roles. The camera looks north-west down the pad.
         this.startMatch('def');
         this.phase = 'round';
         this.hud.hideBuy();
         this.hud.bannerEl.style.display = 'none'; this.hud.bannerTimer = 0;
         this.round = 7; this.scoreDef = 4; this.scoreAtk = 3; this.timer = 62;
         this.roundWinsDef = 4; this.roundWinsAtk = 3;
-        this.player.resetSpawn(-6, 4, -Math.PI / 2);
+        this.player.resetSpawn(-13, -9, 1.15);
         this.player.health = 86; this.player.armour = 94; this.player.money = 5000;
         this.player.buyWeapon('carbine');
         this.player.money = 3850;
         const w = this.player.weapon(); w.mag = 24; w.reserve = 90;
-        this.player.grenades = { frag: 1, flash: 1, smoke: 2, fire: 1 };
+        this.player.grenades = { frag: 1, flash: 1, smoke: 2, fire: 1, flare: 1 };
         const e1 = this.bots.find((b) => b.team === 'atk' && b.name === 'Vex');
         const e2 = this.bots.find((b) => b.team === 'atk' && b.name === 'Jax');
-        // Vex holds the overlook deck, 2.84 m up; Jax pushes the mid corridor.
-        e1.resetSpawn(10, 4, Math.PI * 0.85, 'carbine', 50);
-        e1.pos.y = 2.84; e1.mesh.position.set(10, 2.84, 4); e1.mesh.rotation.y = Math.PI * 0.85;
-        e2.resetSpawn(5, 3, Math.PI / 2, 'smg', 0); e2.mesh.position.set(5, 0, 3); e2.mesh.rotation.y = Math.PI / 2;
+        // Vex holds the pad by the bow ramp; Jax pushes the pad's south edge.
+        e1.resetSpawn(-21, -12, Math.PI * 0.85, 'carbine', 50);
+        e1.mesh.position.set(-21, 0, -12); e1.mesh.rotation.y = Math.PI * 0.85;
+        e2.resetSpawn(-16, -16, Math.PI / 2, 'smg', 0); e2.mesh.position.set(-16, 0, -16); e2.mesh.rotation.y = Math.PI / 2;
         const t1 = this.bots.find((b) => b.team === 'def' && b.name === 'Kael');
-        t1.resetSpawn(0, 6.5, -Math.PI / 2, 'carbine', 50); t1.mesh.position.set(0, 0, 6.5);
-        this.fireZones.ignite(2, 4);
-        // Smoke off the sightline to the overlook, so the enemy on the deck
-        // still reads through the frame instead of hiding behind a puff.
-        this.effects.smoke(5, 1.4, 0.8, 3, 14);
-        this.effects.smoke(7.5, 1.6, 6.8, 2.5, 14);
-        // A live tracer from the player's muzzle toward the overlook.
+        t1.resetSpawn(-9, -5, Math.PI * 0.75, 'carbine', 50); t1.mesh.position.set(-9, 0, -5); t1.mesh.rotation.y = Math.PI * 0.75;
+        // A flare burns over the pad; smoke drifts off the sightline to Vex.
+        this.flares.light(-20, 1.4, -12);
+        this.effects.smoke(-16, 1.4, -7, 3, 14);
+        // A live tracer from the player's muzzle toward Vex on the pad.
         const eye = this.player.eyePos(new THREE.Vector3());
-        this.effects.tracer({ x: eye.x + 0.3, y: eye.y - 0.15, z: eye.z - 0.5 }, { x: 10, y: 4.6, z: 4 });
-        this.camera.position.set(this.player.pos.x, 1.62, this.player.pos.z);
-        this.camera.rotation.set(-0.02, this.player.yaw, 0, 'YXZ');
+        this.effects.tracer({ x: eye.x + 0.3, y: eye.y - 0.15, z: eye.z - 0.5 }, { x: -21, y: 1.2, z: -12 });
+        // Slightly raised camera, tilted down: the pad, its striped A and the
+        // flare read in one frame instead of the ferry hull filling it.
+        this.camera.position.set(this.player.pos.x, 2.4, this.player.pos.z);
+        this.camera.rotation.set(-0.10, this.player.yaw, 0, 'YXZ');
       }
       // One live step so the HUD, minimap and crosshair refresh from the staged
       // state, then clear anything the bots said during it and lay the staged
@@ -932,9 +1063,14 @@ export class Game {
       if (kind === 'play') {
         this.hud.addFeed('Vex <span class="wp">AR-47 CARBINE</span> <span class="hs">HS</span> Warden Kael');
         this.hud.addFeed('Mara <span class="wp">K9 COMPACT SMG</span> Jax');
-        this.hud.addFeed('YOU <span class="wp">IGNIS</span> Rook');
-        this.hud.callout('Vex', 'contact mid — one on the overlook!', 'atk');
-        this.hud.callout('Kael', 'fire on mid, do not push through it', 'def');
+        this.hud.addFeed('YOU <span class="wp">FLARE</span> Rook');
+        this.radio.line(this.bots.find((b) => b.name === 'Vex'), 'Contact Bow Ramp — 2 spotted!');
+        this.radio.line(this.bots.find((b) => b.name === 'Kael'), 'Holding Bow Ramp — flare up, I see them');
+      } else if (kind === 'event') {
+        this.hud.banner('CHARGE DROPPED', 'The charge is on the ground — pick it up', 9);
+        this.hud.addFeed('Kael <span class="wp">AR-47 CARBINE</span> Rook');
+        this.radio.line(this.bots.find((b) => b.name === 'Sol'), 'Charge dropped — Mid Arch! Pick it up!');
+        this.radio.line(this.bots.find((b) => b.name === 'Kael'), 'Contact Mid Arch — carrier down, hold the charge');
       } else if (kind === 'mid') {
         this.hud.addFeed('Vex <span class="wp">TEMPEST 7.62</span> Mara');
         this.hud.callout('Vex', 'holding the connector window — watch it!', 'atk');

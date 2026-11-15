@@ -41,7 +41,7 @@ export class Player {
     camera.add(this.viewmodel);
     this.slots = { primary: null, secondary: this.freshWeapon('p9'), melee: this.freshWeapon('knife') };
     this.slot = 'secondary';
-    this.grenades = { frag: 0, flash: 0, smoke: 0 };
+    this.grenades = { frag: 0, flash: 0, smoke: 0, flare: 0 };
     this.buildViewmodel();
   }
   freshWeapon(id) {

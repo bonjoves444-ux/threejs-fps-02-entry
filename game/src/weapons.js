@@ -84,13 +84,28 @@ export const WEAPONS = {
   },
 };
 
+// One-line shop flavour per gun, shown under its name in the buy menu.
+export const FLAVOUR = {
+  p9: 'Cheap, fast, always there',
+  revolver: 'One shot, one down — slow',
+  smg: 'Fast, loose, cheap',
+  carbine: 'Accurate all-rounder',
+  dmr: 'Taps heads at range',
+  lmg: 'Sixty rounds — hold the lane',
+  scoped: 'One-shot body, scoped',
+  shotgun: 'Eight pellets, owns close range',
+  knife: 'Silent, fast, up close',
+};
+
 // Grenades: frag kills, flash blinds, smoke blocks sight (bots and players alike),
-// Ignis lights a fire zone that denies an area for 7 seconds.
+// Ignis lights a fire zone that denies an area for 7 seconds, and a flare
+// lights a push for 8 seconds.
 export const GRENADES = {
-  frag: { id: 'frag', name: 'FRAG', price: 300, key: '4', radius: 7, damage: 95 },
-  flash: { id: 'flash', name: 'FLASH', price: 200, key: '5', radius: 16 },
-  smoke: { id: 'smoke', name: 'SMOKE', price: 300, key: '6', radius: 5, life: 14 },
-  fire: { id: 'fire', name: 'IGNIS', price: 400, key: '7', radius: 3.5, life: 7, damage: 12 },
+  frag: { id: 'frag', name: 'FRAG', price: 300, key: '4', radius: 7, damage: 95, flavour: 'Bouncing blast, 1.6 s fuse' },
+  flash: { id: 'flash', name: 'FLASH', price: 200, key: '5', radius: 16, flavour: 'Blinds anyone looking at it' },
+  smoke: { id: 'smoke', name: 'SMOKE', price: 300, key: '6', radius: 5, life: 14, flavour: 'Smoke cloud — blocks sight' },
+  fire: { id: 'fire', name: 'IGNIS', price: 400, key: '7', radius: 3.5, life: 7, damage: 12, flavour: 'Fire zone — denies ground 7 s' },
+  flare: { id: 'flare', name: 'FLARE', price: 250, key: '8', radius: 6, life: 8, flavour: 'Lights a push for 8 s' },
 };
 
 export const ARMOUR_PRICE = 650;   // kevlar + helm: halves body damage, blocks one headshot tier

@@ -44,12 +44,46 @@ function signTexture(lines, bg, fg, accent) {
   if (lines[1]) { g.font = '700 34px Arial'; g.fillStyle = accent; g.fillText(lines[1], 44, 142); }
   const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
 }
-function letterTexture(letter, color) {
-  const c = document.createElement('canvas'); c.width = 256; c.height = 256;
+// The quay floor: concrete tiles with expansion joints, stains and speckle, so
+// the ground reads as a worked surface instead of one flat colour.
+function groundTexture() {
+  const c = document.createElement('canvas'); c.width = 1024; c.height = 704;
   const g = c.getContext('2d');
-  g.clearRect(0, 0, 256, 256);
-  g.fillStyle = color; g.font = '900 210px Arial'; g.textAlign = 'center'; g.textBaseline = 'middle';
-  g.fillText(letter, 128, 138);
+  g.fillStyle = '#8f8578'; g.fillRect(0, 0, 1024, 704);
+  // Tile joints every 4 m (about 66 px), slightly darker, with a warm tint.
+  g.strokeStyle = 'rgba(60,52,44,0.5)'; g.lineWidth = 3;
+  for (let x = 0; x <= 1024; x += 66) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, 704); g.stroke(); }
+  for (let y = 0; y <= 704; y += 66) { g.beginPath(); g.moveTo(0, y); g.lineTo(1024, y); g.stroke(); }
+  // Stains: soft dark ellipses, deterministic from a fixed seed list.
+  const stains = [[120, 90, 70, 40], [700, 180, 90, 55], [300, 420, 110, 60], [880, 520, 80, 46], [480, 620, 95, 50], [60, 520, 60, 38], [940, 80, 70, 42], [560, 300, 60, 36]];
+  for (const [x, y, rx, ry] of stains) {
+    g.fillStyle = 'rgba(40,34,28,0.14)';
+    g.beginPath(); g.ellipse(x, y, rx, ry, 0.4, 0, Math.PI * 2); g.fill();
+  }
+  // Speckle: a few thousand faint dots for grain.
+  g.fillStyle = 'rgba(255,240,210,0.05)';
+  for (let i = 0; i < 2600; i++) g.fillRect((i * 7919) % 1024, (i * 104729) % 704, 2, 2);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+// A site pad: hazard-striped border, one giant letter, the site name — the
+// whole pad reads from across the map, the way a painted helipad does.
+function sitePadTexture(letter, sub) {
+  const c = document.createElement('canvas'); c.width = 512; c.height = 448;
+  const g = c.getContext('2d');
+  g.fillStyle = '#7d6a4e'; g.fillRect(0, 0, 512, 448);
+  // Diagonal hazard border, 26 px wide.
+  g.save(); g.beginPath(); g.rect(0, 0, 512, 448); g.clip();
+  for (let i = -8; i < 20; i++) {
+    g.fillStyle = i % 2 ? '#14181c' : '#ffb02e';
+    g.beginPath();
+    g.moveTo(i * 52, -10); g.lineTo(i * 52 + 26, -10); g.lineTo(i * 52 + 26 + 448, 458); g.lineTo(i * 52 + 448, 458);
+    g.closePath(); g.fill();
+  }
+  g.restore();
+  g.fillStyle = 'rgba(125,106,78,0.25)'; g.fillRect(26, 26, 460, 396);
+  g.fillStyle = 'rgba(255,240,210,0.92)'; g.font = '900 250px Arial';
+  g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(letter, 256, 210);
+  g.fillStyle = '#ffd98a'; g.font = '900 30px Arial'; g.fillText(sub, 256, 392);
   const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
 }
 
@@ -88,21 +122,27 @@ export class QuayMap {
     this.group.add(m); return m;
   }
   build() {
-    // --- ground: sun-bleached concrete quay, with a darker service road down mid.
-    this.flat(0, 0, 62, 42, PAL.quay, 0.0);
+    // --- ground: textured concrete quay, with a darker service road down mid.
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(62, 42),
+      new THREE.MeshLambertMaterial({ map: groundTexture() }));
+    ground.rotation.x = -Math.PI / 2; ground.position.set(0, 0.005, 0); this.group.add(ground);
     this.flat(2, 0, 10, 40, PAL.asphalt, 0.015);
     // Hazard rings around both sites, and painted site letters on the concrete.
     this.flat(-22, -13, 12.4, 0.35, PAL.yellow); this.flat(-22, -8, 12.4, 0.35, PAL.yellow);
     this.flat(-28.2, -13, 0.35, 10.4, PAL.yellow); this.flat(-15.8, -13, 0.35, 10.4, PAL.yellow);
     this.flat(18, 6, 12.4, 0.35, PAL.yellow); this.flat(18, 18, 12.4, 0.35, PAL.yellow);
     this.flat(11.8, 12, 0.35, 12.4, PAL.yellow); this.flat(24.2, 12, 0.35, 12.4, PAL.yellow);
-    const la = new THREE.Mesh(new THREE.PlaneGeometry(7, 7), new THREE.MeshBasicMaterial({ map: letterTexture('A', 'rgba(255,176,46,0.85)'), transparent: true }));
-    la.rotation.x = -Math.PI / 2; la.position.set(-22, 0.03, -13); this.group.add(la);
-    const lb = la.clone(); lb.material = new THREE.MeshBasicMaterial({ map: letterTexture('B', 'rgba(255,176,46,0.85)'), transparent: true });
-    lb.position.set(18, 0.03, 12); this.group.add(lb);
+    // Site pads: hazard-striped, one giant letter each — the whole pad reads
+    // from across the quay.
+    const pa = new THREE.Mesh(new THREE.PlaneGeometry(12.4, 10.4),
+      new THREE.MeshBasicMaterial({ map: sitePadTexture('A', 'SITE A — FERRY BERTH') }));
+    pa.rotation.x = -Math.PI / 2; pa.position.set(-22, 0.04, -13); this.group.add(pa);
+    const pb = new THREE.Mesh(new THREE.PlaneGeometry(12.4, 10.4),
+      new THREE.MeshBasicMaterial({ map: sitePadTexture('B', 'SITE B — CONTAINER YARD') }));
+    pb.rotation.x = -Math.PI / 2; pb.position.set(18, 0.04, 12); this.group.add(pb);
     // --- water: the harbour west of the quay, teal and flat in the low sun.
     const water = new THREE.Mesh(new THREE.PlaneGeometry(90, 90),
-      new THREE.MeshLambertMaterial({ color: PAL.water, roughness: 0.25 }));
+      new THREE.MeshLambertMaterial({ color: PAL.water }));
     water.rotation.x = -Math.PI / 2; water.position.set(-75, -0.5, 0); this.group.add(water);
     // --- the ferry: a white hull with a teal stripe, moored along the west edge.
     this.box(-27, 2.2, -2, 7, 4.4, 30, 0xe8e2d4);
@@ -161,6 +201,12 @@ export class QuayMap {
     // Site signs face the site mouths, so a player pushing in reads them.
     this.sign(-16.8, 2.6, -13, -Math.PI / 2, 7, 2.6, ['SITE A', 'FERRY BERTH'], '#0b0f14', '#ffd98a', PAL.yellow);
     this.sign(12.8, 2.6, 12, -Math.PI / 2, 7, 2.6, ['SITE B', 'CONTAINER YARD'], '#0b0f14', '#ffd98a', PAL.yellow);
+    // Named-zone signs, each on a two-high container face so they sit on cargo,
+    // not in mid-air: the map reads its own callouts back at you.
+    this.sign(-2, 3.2, -0.6, 0, 7, 2.2, ['MID ARCH', 'QUAY 7 · CENTRE'], '#0b0f14', '#ffd98a', PAL.teal);
+    this.sign(2, 3.2, -10.6, 0, 7, 2.2, ['NORTH STACKS', 'CONTAINERS 1–6'], '#0b0f14', '#ffd98a', PAL.rust);
+    this.sign(20, 3.4, 12.6, Math.PI, 7, 2.2, ['CRANE ROW', 'STACKS · SOUTH WEST'], '#0b0f14', '#ffd98a', PAL.yellow);
+    this.sign(0, 3.4, 6.6, Math.PI, 7, 2.2, ['QUAY STEPS', 'SOUTH LANE · MIND THE GAP'], '#0b0f14', '#ffd98a', PAL.teal);
     // --- perimeter: low quay walls north/south so nobody walks into the water.
     this.box(0, 0.8, -20.6, 62, 1.6, 0.8, PAL.quayDark);
     this.box(0, 0.8, 20.6, 62, 1.6, 0.8, PAL.quayDark);
