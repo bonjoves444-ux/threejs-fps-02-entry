@@ -107,6 +107,37 @@
   #scores td, #scores th { padding:5px 6px; text-align:right; border-bottom:1px solid rgba(255,255,255,.07); }
   #scores td:first-child, #scores th:first-child { text-align:left; }
   #scores .me { color:var(--amber); font-weight:800; }
+  #scores .mvp { color:var(--amber); }
+  #roundhist { display:flex; gap:3px; margin-top:10px; flex-wrap:wrap; }
+  #roundhist i { width:16px; height:16px; font-size:10px; font-style:normal; font-weight:900; line-height:16px; text-align:center; border-radius:3px; background:#33454e; color:#fff; }
+  #roundhist i.w { background:#37d67a; } #roundhist i.l { background:#ff6b61; }
+  /* --- bomb timer bar --- */
+  #bombbar { position:absolute; top:66px; left:50%; transform:translateX(-50%); width:360px; text-align:center; }
+  #bombbar .track { height:8px; background:rgba(0,0,0,.6); border:1px solid var(--line); border-radius:4px; overflow:hidden; }
+  #bombbar .track i { display:block; height:100%; background:#ff3b30; width:100%; }
+  #bombbar.urgent .track i { animation:blink .5s steps(2) infinite; }
+  #bombLbl { font-size:11px; letter-spacing:.14em; color:#ffb3ae; margin-top:3px; text-shadow:0 2px 6px #000; }
+  @keyframes blink { 50% { opacity:.35; } }
+  /* --- hit direction + damage numbers --- */
+  #hitdir { position:absolute; left:50%; top:50%; width:130px; height:130px; margin:-65px 0 0 -65px; opacity:0; pointer-events:none; background:conic-gradient(from -30deg at center, rgba(255,40,30,.9) 0deg, rgba(255,40,30,0) 60deg, transparent 360deg); border-radius:50%; }
+  #dmgnums { position:absolute; left:50%; top:50%; pointer-events:none; }
+  #dmgnums .dmg { position:absolute; font-size:15px; font-weight:900; color:#fff; text-shadow:0 2px 4px #000; animation:rise .75s ease-out forwards; }
+  #dmgnums .dmg.hs { color:var(--amber); font-size:18px; }
+  @keyframes rise { from { opacity:1; transform:translateY(0); } to { opacity:0; transform:translateY(-34px); } }
+  #ammo.low { color:#ff6b61; animation:blink .8s steps(2) infinite; }
+  #hitmark.kill i { background:var(--amber); }
+  #xhair.dot i.t, #xhair.dot i.b, #xhair.dot i.l, #xhair.dot i.r { display:none; }
+  #xhair.circle i { display:none; }
+  #xhair.circle { width:26px; height:26px; margin:-13px 0 0 -13px; border:2px solid #fff; border-radius:50%; }
+  #xhair.circle .dot { display:none; }
+  /* --- settings --- */
+  .settings { margin-top:14px; border-top:1px solid var(--line); padding-top:12px; }
+  .settings h3 { font-size:13px; letter-spacing:.14em; color:#9fb4bd; margin-bottom:8px; }
+  .srow { display:flex; align-items:center; justify-content:space-between; gap:12px; font-size:12px; margin-top:6px; }
+  .srow label { color:#cfe3ea; letter-spacing:.06em; }
+  .srow input[type=range] { width:220px; accent-color:var(--amber); }
+  .srow select { background:#16222a; color:#fff; border:1px solid var(--line); border-radius:4px; padding:4px 8px; }
+  .shop .cat { grid-column:1 / -1; font-size:11px; letter-spacing:.16em; color:var(--amber); margin-top:6px; }
   .hidden { display:none !important; }
   #err { position:absolute; left:14px; top:170px; color:#ff6b61; font-size:12px; max-width:420px; }
 </style>
@@ -127,6 +158,7 @@
       <span class="pips" id="pipsAtk"></span>
       <span class="num" id="scoreAtk">0</span><span class="team atk">RUNNERS</span>
     </div>
+    <div id="bombbar" class="hidden"><div class="track"><i id="bombFill"></i></div><div id="bombLbl"></div></div>
     <div id="feed"></div>
     <div class="panel" id="vitals">
       <div class="who"><b id="pname">YOU</b> · <span id="prole">DOCKERS — DEFEND</span><span class="money" id="money">$800</span></div>
@@ -142,6 +174,7 @@
     </div>
     <div id="xhair"><i class="t"></i><i class="b"></i><i class="l"></i><i class="r"></i><i class="dot"></i></div>
     <div id="hitmark"><i style="left:0;top:0;transform:rotate(45deg)"></i><i style="right:0;top:0;transform:rotate(-45deg)"></i><i style="left:0;bottom:0;transform:rotate(-45deg)"></i><i style="right:0;bottom:0;transform:rotate(45deg)"></i></div>
+    <div id="hitdir"></div><div id="dmgnums"></div>
     <div id="vig"></div><div id="flash"></div><div id="scope"></div>
     <div id="banner"><h1 id="bannerTitle"></h1><p id="bannerSub"></p></div>
     <div id="progress"><div class="lbl" id="progLbl">PLANTING CHARGE…</div><div class="track"><i id="progFill"></i></div></div>
@@ -163,13 +196,16 @@
       <div class="ctrls">
         <div><b>Move</b> WASD · <b>Jump</b> Space · <b>Crouch</b> Ctrl / C</div>
         <div><b>Quiet walk</b> Shift — silent steps, steadier aim</div>
-        <div><b>Fire</b> Mouse · <b>Aim</b> right mouse (scoped rifle)</div>
-        <div><b>Reload</b> R · <b>Weapons</b> 1 / 2 / wheel</div>
-        <div><b>Grenades</b> 3 frag · 4 flash · 5 smoke</div>
+        <div><b>Fire</b> Mouse · <b>Aim</b> right mouse (rifles zoom)</div>
+        <div><b>Reload</b> R · <b>Weapons</b> 1 / 2 / wheel · <b>Knife</b> 3 or V</div>
+        <div><b>Grenades</b> 4 frag · 5 flash · 6 smoke · 7 Ignis fire</div>
         <div><b>Plant / defuse</b> hold E at the site</div>
         <div><b>Buy</b> B during the buy phase · <b>Scores</b> Tab</div>
-        <div><b>Pause</b> Esc · <b>Restart match</b> from pause</div>
+        <div><b>Inspect</b> F · <b>Pause</b> Esc · <b>Restart match</b> from pause</div>
+        <div><b>After death</b> click cycles teammates · F free camera</div>
+        <div><b>Overlook</b> climb the stairs at mid for the high ground</div>
       </div>
+      <div id="menuSettings"></div>
       <div class="foot">THREE.JS 0.187.0 · SINGLE-PLAYER VS BOTS · NO NETWORK · ALL SOUNDS SYNTHESIZED</div>
     </div>
   </div>
@@ -183,12 +219,14 @@
   </div>
   <div class="overlay hidden" id="scores">
     <div class="card"><h2>SCOREBOARD</h2><div id="scoreTable"></div>
-    <div class="foot">TAB closes · K = kills · D = deaths · $ = money</div></div>
+    <div id="roundhist"></div>
+    <div class="foot">TAB closes · K = kills · D = deaths · DMG = damage dealt · $ = money · ★ = round MVP</div></div>
   </div>
   <div class="overlay hidden" id="pause">
     <div class="card"><h2>PAUSED</h2>
       <p class="sub">The round waits for you. Click resume to lock the mouse again.</p>
       <div class="teamrow"><button id="btnResume">RESUME</button><button id="btnRestart">RESTART MATCH</button></div>
+      <div id="pauseSettings"></div>
     </div>
   </div>
   <div id="err"></div>

@@ -12,24 +12,26 @@ export const MAP = {
   minX: -30, maxX: 30, minZ: -20, maxZ: 20,
   siteA: { x: -22, z: -13, minX: -28, maxX: -16, minY: 0, maxY: 4, minZ: -18, maxZ: -8, name: 'SITE A — FERRY BERTH' },
   siteB: { x: 18, z: 12, minX: 12, maxX: 24, minY: 0, maxY: 4, minZ: 6, maxZ: 18, name: 'SITE B — CONTAINER YARD' },
-  runnerSpawn: [[26, -12], [26, 0], [26, 12], [24, -6], [24, 6]],
+  runnerSpawn: [[22, -12], [22, 0], [22, 12], [20, -6], [20, 6]],
   dockerSpawn: [[-10, 0], [-14, -6], [-6, 6], [-16, -10], [-4, -12]],
 };
 
 // Waypoint graph the bots patrol and rotate on. Nodes are lane junctions and site
 // mouths; edges join neighbours a bot can walk between without crossing a box.
+// Nodes 21-23 run through the mid connector tunnel (z -6), so bots use the
+// choke instead of only the open lanes.
 const WP = [
-  [26, 0], [20, -10], [20, 10], [12, -14], [12, 0], [12, 14],
+  [22, 0], [20, -10], [20, 10], [12, -14], [12, 0], [12, 14],
   [2, -16], [2, -4], [2, 6], [-8, -14], [-8, -4], [-8, 8],
-  [-16, -13], [-22, -13], [18, 12], [-16, 4], [26, -12], [26, 12],
-  [-10, 0], [-2, 12], [6, -10],
+  [-16, -13], [-22, -13], [18, 12], [-16, 4], [22, -12], [22, 12],
+  [-10, 0], [-2, 12], [6, -10], [8, -6], [12, -6], [15, -6],
 ];
 const EDGES = [
   [0, 1], [0, 2], [0, 16], [0, 17], [1, 3], [1, 20], [2, 5], [3, 6], [3, 20],
-  [4, 5], [4, 7], [4, 20], [5, 8], [5, 14], [6, 9], [7, 8], [7, 10], [7, 19],
+  [4, 5], [4, 7], [5, 8], [5, 14], [6, 9], [7, 8], [7, 10], [7, 19],
   [8, 11], [8, 19], [9, 10], [9, 12], [10, 11], [10, 15], [11, 19], [12, 13],
   [12, 15], [14, 5], [14, 19], [15, 18], [16, 1], [17, 2], [18, 10], [18, 7],
-  [19, 11], [20, 6], [1, 4], [2, 4],
+  [19, 11], [20, 6], [2, 4], [7, 20], [1, 23], [23, 22], [22, 21], [21, 7],
 ];
 
 function signTexture(lines, bg, fg, accent) {
@@ -125,12 +127,24 @@ export class QuayMap {
     cont(-10, -2, PAL.teal); cont(-2, -2, PAL.rust, 2); cont(6, -2, PAL.cream); cont(14, -2, PAL.rust);
     cont(-8, 8, PAL.cream); cont(0, 8, PAL.rust, 2); cont(8, 8, PAL.teal);
     cont(20, 14, PAL.rust, 2); cont(15, 16.5, PAL.teal);
-    cont(-14, 4, PAL.rust, 1, 1); cont(12, -8, PAL.teal, 1, 1); cont(-18, 6, PAL.cream, 1, 1);
+    cont(-14, 4, PAL.rust, 1, 1); cont(-14, -8, PAL.teal, 1, 1); cont(-18, 6, PAL.cream, 1, 1);
     // --- crates: low cover dotted along the lanes.
     const crate = (x, z, s = 1.2) => this.box(x, s / 2, z, s, s, s, PAL.wood);
-    crate(-12, -8); crate(-12, -7.4, 0.8); crate(-4, -14, 1.4); crate(8, -6); crate(16, -6);
+    crate(-12, -8); crate(-12, -7.4, 0.8); crate(-4, -14, 1.4); crate(8, -7.6); crate(16, -6);
     crate(-4, 2); crate(10, 4, 1.4); crate(-14, 12); crate(4, 14); crate(14, 8, 0.9);
     crate(-20, -6); crate(22, 2); crate(-24, 2, 1.4); crate(6, 12);
+    // --- the mid connector: a roofed container tunnel at z -6, the map's choke.
+    // Two parallel walls, open at both ends, with a window cut into the north
+    // wall (x 10–12, y 1.0–1.9) to shoot through — the fight over mid is a fight
+    // over this window. The roof stops grenades arcing over it.
+    this.box(8, 1.5, -8, 4, 3, 0.5, PAL.steelDark);            // north wall, west
+    this.box(14, 1.5, -8, 4, 3, 0.5, PAL.steelDark);           // north wall, east
+    this.box(11, 0.5, -8, 2, 1.0, 0.5, PAL.steelDark);         // window sill
+    this.box(11, 2.45, -8, 2, 1.1, 0.5, PAL.steelDark);        // window lintel
+    this.box(11, 1.5, -4, 10, 3, 0.5, PAL.rust);               // south wall
+    this.box(11, 3.15, -6, 10.4, 0.3, 4.4, PAL.steelDark);     // roof
+    this.sign(6.2, 2.2, -6, Math.PI / 2, 3.4, 1.3, ['MID', 'CONNECTOR'], '#0b0f14', '#ffd98a', PAL.yellow);
+    this.sign(15.8, 2.2, -6, -Math.PI / 2, 3.4, 1.3, ['MID', 'CONNECTOR'], '#0b0f14', '#ffd98a', PAL.yellow);
     // --- two gantry cranes over the yard; their legs are real cover.
     for (const z of [-17, 16]) {
       for (const x of [-24, -8, 8, 24]) this.box(x, 6, z, 0.7, 12, 0.7, PAL.yellow);
@@ -186,11 +200,16 @@ export class QuayMap {
   }
   // Axis-separated AABB collision for a capsule-ish actor (radius r, height h).
   // Moves pos by (dx, dz) one axis at a time; returns nothing, edits pos in place.
+  // Boxes whose top is within STEP_UP of the actor's feet are stepped over, not
+  // blocked — that is what lets a player walk up the overlook stairs and jump
+  // onto crates. Boxes taller than that still stop you cold.
   collide(pos, r, h, dx, dz) {
     const c = this.colliders;
+    const STEP_UP = 0.55;
     const hit = (x, z) => {
       for (let i = 0; i < c.length; i++) {
         const b = c[i];
+        if (b.maxY <= pos.y + STEP_UP) continue; // low enough to step onto
         if (pos.y + h > b.minY && pos.y < b.maxY &&
             x + r > b.minX && x - r < b.maxX && z + r > b.minZ && z - r < b.maxZ) return true;
       }
@@ -202,5 +221,18 @@ export class QuayMap {
     if (!hit(pos.x, nz)) pos.z = nz;
     pos.x = Math.max(MAP.minX + r, Math.min(MAP.maxX - r, pos.x));
     pos.z = Math.max(MAP.minZ + r, Math.min(MAP.maxZ - r, pos.z));
+  }
+  // Highest solid top under (x, z) that the actor can stand on: the top of any
+  // collider containing the point whose top is no more than 0.6 above the
+  // actor's current feet, else the quay at 0. Used for landing on crates, the
+  // overlook deck and the stairs.
+  groundHeight(x, z, feetY) {
+    let g = 0;
+    for (let i = 0; i < this.colliders.length; i++) {
+      const b = this.colliders[i];
+      if (b.maxY > feetY + 0.6 || b.maxY <= g) continue;
+      if (x > b.minX && x < b.maxX && z > b.minZ && z < b.maxZ) g = b.maxY;
+    }
+    return g;
   }
 }

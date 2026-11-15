@@ -62,6 +62,17 @@ export class Effects {
     this.flashLight.position.copy(pos);
     this.flashLight.intensity = 26; this.flashLife = 0.05;
   }
+  // The charge going off: a hard white-orange flash, a burst of sparks and a
+  // rising smoke column, all from the pooled systems.
+  explosion(pos) {
+    this.flashLight.position.set(pos.x, pos.y + 1, pos.z);
+    this.flashLight.intensity = 90; this.flashLife = 0.35;
+    this.sparks(pos, 60, 9);
+    this.sparks({ x: pos.x, y: pos.y + 1.5, z: pos.z }, 30, 5);
+    for (let i = 0; i < 4; i++) {
+      this.smoke(pos.x + (Math.random() - 0.5) * 2, 2 + i * 0.8, pos.z + (Math.random() - 0.5) * 2, 3.5, 6);
+    }
+  }
   sparks(pos, n, spread = 2.2) {
     for (let k = 0; k < n; k++) {
       const i = this.sparkIdx; this.sparkIdx = (this.sparkIdx + 1) % SPARK_MAX;

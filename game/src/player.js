@@ -19,10 +19,15 @@ export class Player {
     this.onGround = true;
     this.crouching = false;
     this.eyeHeight = EYE_STAND;
-    this.health = 100; this.armour = 0; this.hasKit = false;
+    this.health = 100; this.armour = 0; this.hasKit = false; this.helmet = false;
     this.money = START_MONEY;
     this.alive = true;
-    this.kills = 0; this.deaths = 0;
+    this.kills = 0; this.deaths = 0; this.damageDealt = 0;
+    this.isPlayer = true;
+    this.lookSens = 1; // mouse sensitivity, from settings
+    this.shotCount = 0; // shots in the current burst, for the recoil pattern
+    this.inspectUntil = 0;
+    this.swayX = 0; this.swayY = 0;
     this.team = 'def'; // 'def' Dockers or 'atk' Runners
     this.name = 'YOU';
     this.bloom = 0;            // spread growth from holding the trigger
@@ -34,7 +39,7 @@ export class Player {
     this.flashUntil = 0;       // blinded by a flashbang until this game time
     this.viewmodel = new THREE.Group();
     camera.add(this.viewmodel);
-    this.slots = { primary: null, secondary: this.freshWeapon('p9') };
+    this.slots = { primary: null, secondary: this.freshWeapon('p9'), melee: this.freshWeapon('knife') };
     this.slot = 'secondary';
     this.grenades = { frag: 0, flash: 0, smoke: 0 };
     this.buildViewmodel();
@@ -50,7 +55,7 @@ export class Player {
     if (this.money < def.price || this.hasWeapon(id)) return false;
     this.money -= def.price;
     const w = this.freshWeapon(id);
-    if (id === 'p9') this.slots.secondary = w;
+    if (id === 'p9' || id === 'revolver') this.slots.secondary = w;
     else { this.slots.primary = w; this.slot = 'primary'; }
     this.buildViewmodel();
     return true;
@@ -63,7 +68,7 @@ export class Player {
   }
   startReload(now) {
     const w = this.weapon();
-    if (!w || this.reloading || w.mag >= w.def.mag || w.reserve <= 0) return false;
+    if (!w || w.def.melee || this.reloading || w.mag >= w.def.mag || w.reserve <= 0) return false;
     this.reloading = true;
     this.reloadUntil = now + w.def.reload;
     this.sfx.reload();
@@ -88,6 +93,7 @@ export class Player {
     if (!this.onGround) s += d.airSpread;
     if (this.crouching) s *= 0.55;
     if (this.scoped) s *= 0.35;
+    else if (this.aiming && w.def.ads) s *= 0.55; // aiming down sights steadies rifles
     return s;
   }
   get scoped() { const w = this.weapon(); return !!(w && w.def.scoped && this.aiming); }
@@ -96,12 +102,14 @@ export class Player {
     out.set(this.pos.x, this.pos.y + this.eyeHeight, this.pos.z);
     return out;
   }
-  // Damage: armour soaks 50% of body damage until it breaks; a helmet turns a
-  // headshot into a body hit's worth of extra damage instead of the full multiplier
-  // (the multiplier itself is applied by the shooter before calling here).
-  takeDamage(amount, isHead) {
+  // Damage: leg shots deal 25% less; a helmet halves a headshot (the multiplier
+  // itself is applied by the shooter before calling here); kevlar soaks 50% of
+  // what is left until it breaks.
+  takeDamage(amount, isHead, isLeg) {
     if (!this.alive) return 0;
     let dmg = amount;
+    if (isLeg) dmg *= 0.75;
+    if (isHead && this.helmet) dmg *= 0.5;
     if (this.armour > 0) {
       const soaked = Math.min(this.armour, dmg * 0.5);
       this.armour -= soaked; dmg -= soaked;
@@ -111,8 +119,11 @@ export class Player {
     return dmg;
   }
   addLook(dx, dy) {
-    this.yaw -= dx * 0.0022;
-    this.pitch = clamp(this.pitch - dy * 0.0022, -1.45, 1.45);
+    this.yaw -= dx * 0.0022 * this.lookSens;
+    this.pitch = clamp(this.pitch - dy * 0.0022 * this.lookSens, -1.45, 1.45);
+    // Viewmodel sway lags the look a touch.
+    this.swayX = clamp(this.swayX + dx * 0.00003 * this.lookSens, -0.04, 0.04);
+    this.swayY = clamp(this.swayY + dy * 0.00003 * this.lookSens, -0.03, 0.03);
   }
   update(dt, input, now) {
     if (!this.alive) return;
@@ -120,8 +131,11 @@ export class Player {
     const targetEye = this.crouching ? EYE_CROUCH : EYE_STAND;
     this.eyeHeight = lerp(this.eyeHeight, targetEye, Math.min(1, dt * 12));
     // Wish direction from the keys, rotated by yaw. Shift is a quiet walk: slower,
-    // silent, steadier — the trade for giving up speed.
-    const speed = this.crouching ? CROUCH_SPEED : input.walk ? QUIET_SPEED : WALK_SPEED;
+    // silent, steadier — the trade for giving up speed. Aiming a rifle and
+    // carrying the LMG both slow you down further.
+    const w = this.weapon();
+    const slow = (w && w.def.moveSlow ? w.def.moveSlow : 1) * (this.aiming && w && w.def.ads ? 0.6 : 1);
+    const speed = (this.crouching ? CROUCH_SPEED : input.walk ? QUIET_SPEED : WALK_SPEED) * slow;
     const sin = Math.sin(this.yaw), cos = Math.cos(this.yaw);
     let fx = 0, fz = 0;
     if (input.forward) { fx -= sin; fz -= cos; }
@@ -144,7 +158,9 @@ export class Player {
     this.vel.y -= 22 * dt;
     this.map.collide(this.pos, 0.36, this.crouching ? 1.15 : 1.7, this.vel.x * dt, this.vel.z * dt);
     this.pos.y += this.vel.y * dt;
-    if (this.pos.y <= 0) { this.pos.y = 0; this.vel.y = 0; this.onGround = true; }
+    // Land on the quay, or on top of a crate, a stair or the overlook deck.
+    const ground = this.map.groundHeight(this.pos.x, this.pos.z, this.pos.y);
+    if (this.pos.y <= ground) { this.pos.y = ground; this.vel.y = 0; this.onGround = true; }
     // Footsteps: audible to nearby bots unless quiet-walking.
     const hSpeed = Math.hypot(this.vel.x, this.vel.z);
     if (this.onGround && hSpeed > 1.2) {
@@ -158,9 +174,17 @@ export class Player {
     const bob = this.onGround && hSpeed > 1 ? Math.sin(now * 9) * 0.025 * (hSpeed / WALK_SPEED) : 0;
     this.camera.position.set(this.pos.x, this.pos.y + this.eyeHeight + bob, this.pos.z);
     this.camera.rotation.set(this.pitch + this.recoilPitch, this.yaw, 0, 'YXZ');
-    // Viewmodel sway: lags the look a touch, kicks on each shot.
-    this.viewmodel.position.set(0.34, -0.30 + bob * 0.4, -0.55);
-    this.viewmodel.rotation.x = this.recoilPitch * 1.4;
+    // Viewmodel sway: lags the look a touch, kicks on each shot, dips on reload,
+    // and turns over on inspect (F).
+    const inspecting = now < this.inspectUntil;
+    this.viewmodel.position.set(
+      0.34 + this.swayX,
+      -0.30 + bob * 0.4 + (this.reloading ? -0.09 : 0) + (inspecting ? -0.06 : 0),
+      -0.55);
+    this.viewmodel.rotation.x = this.recoilPitch * 1.4 + (inspecting ? 0.9 : 0);
+    this.viewmodel.rotation.y = this.swayY * 2 + (inspecting ? -0.7 : 0);
+    this.swayX = lerp(this.swayX, 0, Math.min(1, dt * 8));
+    this.swayY = lerp(this.swayY, 0, Math.min(1, dt * 8));
   }
   // A low-poly gun from boxes, rebuilt per weapon. Colours match the weapon's role
   // so the viewmodel reads at a glance even before the HUD does.
@@ -177,6 +201,19 @@ export class Player {
     };
     if (w.def.id === 'p9') {
       box(0.07, 0.09, 0.24, 0, 0, 0); box(0.06, 0.12, 0.08, 0, -0.09, 0.06);
+    } else if (w.def.id === 'revolver') {
+      const cyl = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.16, 10), mid);
+      cyl.rotation.x = Math.PI / 2; cyl.position.set(0, 0.01, -0.02); g.add(cyl);
+      box(0.06, 0.08, 0.2, 0, 0, -0.12); box(0.06, 0.13, 0.08, 0, -0.09, 0.06);
+    } else if (w.def.id === 'knife') {
+      box(0.03, 0.02, 0.3, 0, 0.01, -0.12, new THREE.MeshLambertMaterial({ color: 0xc8d2d8 }));
+      box(0.045, 0.05, 0.14, 0, 0, 0.08);
+    } else if (w.def.id === 'dmr') {
+      box(0.07, 0.09, 0.66, 0, 0, 0); box(0.05, 0.05, 0.3, 0, 0.07, -0.02, accent);
+      box(0.06, 0.12, 0.07, 0, -0.09, 0.1); box(0.05, 0.06, 0.12, 0, -0.03, -0.32, mid);
+    } else if (w.def.id === 'lmg') {
+      box(0.08, 0.10, 0.6, 0, 0, 0); box(0.07, 0.14, 0.12, 0, -0.11, 0.05, mid);
+      box(0.05, 0.05, 0.2, 0, 0.06, -0.08, accent); box(0.04, 0.12, 0.04, 0, -0.12, -0.22, mid);
     } else if (w.def.id === 'smg') {
       box(0.07, 0.08, 0.42, 0, 0, 0); box(0.05, 0.10, 0.06, 0, -0.08, 0.12, mid); box(0.06, 0.06, 0.16, 0, -0.01, -0.26);
     } else if (w.def.id === 'shotgun') {
@@ -196,5 +233,6 @@ export class Player {
     this.pos.set(x, 0, z); this.vel.set(0, 0, 0);
     this.yaw = yaw; this.pitch = 0; this.health = 100; this.alive = true;
     this.bloom = 0; this.reloading = false; this.flashUntil = 0;
+    this.shotCount = 0; this.inspectUntil = 0;
   }
 }

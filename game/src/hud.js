@@ -57,24 +57,81 @@ export class Hud {
     if (!w) return;
     $('wname').textContent = w.def.name;
     $('wmode').textContent = w.def.mode + (player.reloading ? ' · RELOADING…' : '');
-    $('ammo').innerHTML = `${w.mag} <small>/ ${w.reserve}</small>`;
-    const p = player.slots.primary, s = player.slots.secondary;
+    if (w.def.melee) $('ammo').innerHTML = '— <small>MELEE</small>';
+    else $('ammo').innerHTML = `${w.mag} <small>/ ${w.reserve}</small>`;
+    $('ammo').classList.toggle('low', !w.def.melee && w.mag <= Math.max(1, Math.ceil(w.def.mag * 0.25)));
+    const p = player.slots.primary, s = player.slots.secondary, m = player.slots.melee;
     let slots = '';
     if (s) slots += `<span class="${player.slot === 'secondary' ? 'on' : ''}">1 ${s.def.name.split(' ')[0]}</span>`;
     if (p) slots += `<span class="${player.slot === 'primary' ? 'on' : ''}">2 ${p.def.name.split(' ')[0]}</span>`;
+    if (m) slots += `<span class="${player.slot === 'melee' ? 'on' : ''}">3 KNIFE</span>`;
     $('slots').innerHTML = slots;
     const g = player.grenades;
     $('nades').innerHTML =
-      `FRAG <b>${g.frag}</b> [3] · FLASH <b>${g.flash}</b> [4] · SMOKE <b>${g.smoke}</b> [5]` +
-      (player.hasKit ? ` · <b style="color:#7cc8ff">DEFUSE KIT</b>` : '');
+      `FRAG <b>${g.frag}</b> [4] · FLASH <b>${g.flash}</b> [5] · SMOKE <b>${g.smoke}</b> [6] · IGNIS <b>${g.fire || 0}</b> [7]` +
+      (player.hasKit ? ` · <b style="color:#7cc8ff">DEFUSE KIT</b>` : '') +
+      (player.helmet ? ` · <b style="color:#7cc8ff">HELM</b>` : '');
   }
   // Crosshair gap grows with the live spread, so the player sees accuracy.
+  // Style, colour and size come from settings; scoped rifles hide it entirely.
   setCrosshair(spreadPx, scoped) {
     $('scope').style.display = scoped ? 'block' : 'none';
-    const gap = Math.round(4 + spreadPx);
+    const gap = Math.round((4 + spreadPx) * (this._xSize || 1));
     const parts = this.xhair.children;
+    const style = this._xStyle || 'cross';
+    this.xhair.className = style;
+    const col = this._xColor || '#ffffff';
+    for (const p of parts) p.style.background = col;
     parts[0].style.top = `${-gap - 9}px`; parts[1].style.top = `${gap}px`;
     parts[2].style.left = `${-gap - 9}px`; parts[3].style.left = `${gap}px`;
+  }
+  applySettings(s) {
+    this._xStyle = s.crosshair; this._xColor = s.crosshairColor; this._xSize = s.crosshairSize;
+    this._dmgNums = s.damageNumbers;
+  }
+  // Bomb timer bar under the score bar, once the charge is planted.
+  setBombBar(frac, seconds, site) {
+    const bar = $('bombbar');
+    if (frac == null) { bar.classList.add('hidden'); return; }
+    bar.classList.remove('hidden');
+    $('bombFill').style.width = `${Math.max(0, Math.min(100, frac * 100))}%`;
+    $('bombLbl').textContent = `CHARGE — SITE ${site} · ${Math.ceil(seconds)}s`;
+    bar.classList.toggle('urgent', seconds <= 10);
+  }
+  // Round history strip: one letter per finished round, W or L from your side.
+  setRoundHistory(hist) {
+    const el = $('roundhist');
+    if (!el) return;
+    el.innerHTML = hist.map((h) => `<i class="${h === 'W' ? 'w' : 'l'}">${h}</i>`).join('');
+  }
+  // Red arc showing the direction the last hit came from (0 = ahead).
+  hitDir(angleDeg) {
+    const el = $('hitdir');
+    if (!el) return;
+    el.style.transform = `translate(-50%,-50%) rotate(${angleDeg}deg)`;
+    el.style.opacity = '1';
+    clearTimeout(this._hdT);
+    this._hdT = setTimeout(() => { el.style.opacity = '0'; }, 900);
+  }
+  // Floating damage number near the crosshair.
+  dmgNum(amount, head) {
+    if (this._dmgNums === false) return;
+    const host = $('dmgnums');
+    if (!host) return;
+    const d = document.createElement('div');
+    d.className = head ? 'dmg hs' : 'dmg';
+    d.textContent = Math.round(amount);
+    d.style.left = `${(Math.random() - 0.5) * 90}px`;
+    d.style.top = `${(Math.random() - 0.5) * 50 - 10}px`;
+    host.appendChild(d);
+    setTimeout(() => d.remove(), 750);
+  }
+  // Kill confirm: the hitmarker flashes gold on a kill.
+  killConfirm(head) {
+    this.hitmarker(head);
+    this.hitEl.classList.add('kill');
+    clearTimeout(this._kcT);
+    this._kcT = setTimeout(() => this.hitEl.classList.remove('kill'), 250);
   }
   hitmarker(head) {
     this.hitEl.style.opacity = '1';
@@ -182,19 +239,27 @@ export class Hud {
   }
   buildShop() {
     const shop = $('shop');
-    const items = [];
-    for (const id of ['smg', 'carbine', 'shotgun', 'scoped']) {
-      const w = WEAPONS[id];
-      items.push({ key: id, label: `${w.name}`, sub: `${w.mode} · ${w.mag} rounds`, price: w.price, kind: 'weapon' });
-    }
-    items.push({ key: 'armour', label: 'KEVLAR + HELM', sub: 'Halves body damage', price: ARMOUR_PRICE, kind: 'armour' });
-    items.push({ key: 'kit', label: 'DEFUSE KIT', sub: 'Defuse in half the time (Dockers)', price: KIT_PRICE, kind: 'kit' });
-    for (const id of ['frag', 'flash', 'smoke']) {
-      const g = GRENADES[id];
-      items.push({ key: id, label: `${g.name} GRENADE`, sub: `Throw with key ${g.key}`, price: g.price, kind: 'grenade' });
-    }
-    shop.innerHTML = items.map((it) =>
-      `<div class="item" data-key="${it.key}" data-kind="${it.kind}"><span>${it.label}<br><span class="k">${it.sub}</span></span><b>$${it.price.toLocaleString()}</b></div>`).join('');
+    const cat = (title) => `<div class="cat">${title}</div>`;
+    const item = (key, label, sub, price, kind) =>
+      `<div class="item" data-key="${key}" data-kind="${kind}"><span>${label}<br><span class="k">${sub}</span></span><b>$${price.toLocaleString()}</b></div>`;
+    const w = (id) => {
+      const d = WEAPONS[id];
+      return item(id, d.name, `${d.mode} · ${d.mag} rounds`, d.price, 'weapon');
+    };
+    shop.innerHTML =
+      cat('PISTOLS') + w('revolver') +
+      item('p9', 'P9 SIDEARM', 'SEMI · 9MM · 12 rounds · owned', 0, 'weapon') +
+      cat('SMGs') + w('smg') +
+      cat('RIFLES') + w('carbine') + w('dmr') + w('scoped') +
+      cat('HEAVY') + w('shotgun') + w('lmg') +
+      cat('GEAR') +
+      item('armour', 'KEVLAR + HELM', 'Halves body damage · helm halves headshots', ARMOUR_PRICE, 'armour') +
+      item('kit', 'DEFUSE KIT', 'Defuse in half the time (Dockers)', KIT_PRICE, 'kit') +
+      cat('GRENADES') +
+      ['frag', 'flash', 'smoke', 'fire'].map((id) => {
+        const g = GRENADES[id];
+        return item(id, `${g.name} GRENADE`, `Throw with key ${g.key}${id === 'fire' ? ' · 7s fire zone' : ''}`, g.price, 'grenade');
+      }).join('');
   }
   showBuy(money) { $('buyMoney').textContent = `$${money.toLocaleString()}`; $('buy').classList.remove('hidden'); }
   hideBuy() { $('buy').classList.add('hidden'); }

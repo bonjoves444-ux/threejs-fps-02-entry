@@ -9,6 +9,7 @@ export class Sfx {
     this.ctx = null;
     this.master = null;
     this.enabled = true;
+    this.volume = 0.32;
   }
   ensure() {
     if (this.ctx) { if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {}); return true; }
@@ -17,10 +18,14 @@ export class Sfx {
       if (!AC) return false;
       this.ctx = new AC();
       this.master = this.ctx.createGain();
-      this.master.gain.value = 0.32;
+      this.master.gain.value = this.volume;
       this.master.connect(this.ctx.destination);
     } catch { return false; }
     return true;
+  }
+  setVolume(v) {
+    this.volume = v;
+    if (this.master) this.master.gain.value = v;
   }
   // One shaped noise burst through a band-pass filter.
   noise(dur, freq, q, gain, when = 0) {
@@ -55,9 +60,27 @@ export class Sfx {
     else if (kind === 'shotgun') { this.noise(0.20, 500, 0.8, 0.9 * att); this.tone(110, 0.16, 'sine', 0.6 * att, 40); }
     else if (kind === 'pistol') { this.noise(0.09, 1800, 1.2, 0.55 * att); this.tone(190, 0.08, 'sine', 0.35 * att, 70); }
     else if (kind === 'smg') { this.noise(0.08, 1400, 1.1, 0.5 * att); this.tone(170, 0.07, 'sine', 0.3 * att, 60); }
+    else if (kind === 'dmr') { this.noise(0.16, 1000, 0.9, 0.8 * att); this.tone(160, 0.14, 'sine', 0.55 * att, 50); }
+    else if (kind === 'lmg') { this.noise(0.11, 800, 0.9, 0.75 * att); this.tone(130, 0.11, 'sine', 0.5 * att, 48); }
+    else if (kind === 'revolver') { this.noise(0.18, 700, 0.8, 0.9 * att); this.tone(120, 0.16, 'sine', 0.65 * att, 42); }
     else { this.noise(0.12, 1100, 1.0, 0.7 * att); this.tone(150, 0.10, 'sine', 0.45 * att, 55); }
   }
   dryFire() { this.tone(1400, 0.03, 'square', 0.12); }
+  knifeSwing() { this.noise(0.12, 3200, 2.5, 0.18); }
+  knifeHit() { this.noise(0.08, 900, 1.5, 0.4); this.tone(220, 0.08, 'sawtooth', 0.2, 110); }
+  ding() { this.tone(1750, 0.09, 'sine', 0.28); this.tone(2340, 0.07, 'sine', 0.18, 0, 0.05); }
+  radioBeep() { this.tone(1180, 0.06, 'sine', 0.16); this.tone(1180, 0.06, 'sine', 0.16, 0, 0.1); }
+  fireCrackle() { this.noise(0.25, 500, 0.7, 0.35); this.noise(0.15, 1800, 1.5, 0.15, 0.08); }
+  // Harbour ambience: low water wash with a gull cry every few seconds.
+  // Started once per match; the timer guards itself if called twice.
+  startAmbient() {
+    if (this._ambTimer || !this.ensure()) return;
+    this._ambTimer = setInterval(() => {
+      if (!this.enabled || document.hidden) return;
+      this.noise(1.4, 300, 0.5, 0.05);
+      if (Math.random() < 0.5) this.tone(1400 + Math.random() * 500, 0.35, 'sine', 0.05, 900 + Math.random() * 400);
+    }, 4000);
+  }
   reload() { this.tone(500, 0.05, 'square', 0.10); this.tone(340, 0.05, 'square', 0.10, 0, 0.14); this.tone(620, 0.05, 'square', 0.12, 0, 0.34); }
   step(run) { this.noise(0.05, run ? 300 : 220, 1, run ? 0.10 : 0.07); }
   hit(head) { this.tone(head ? 1250 : 950, 0.06, 'sine', 0.22); }

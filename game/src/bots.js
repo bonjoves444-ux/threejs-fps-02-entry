@@ -7,13 +7,16 @@
 // player who stops, peeks and taps wins duels and a player who sprints across an
 // open lane gets punished.
 import * as THREE from 'three';
-import { WEAPONS } from './weapons.js';
+import { WEAPONS, START_MONEY } from './weapons.js';
 import { PAL } from './palette.js';
 import { clamp, angDiff } from './util.js';
 
 const DOCKER_NAMES = ['Kael', 'Mara', 'Ilya', 'Sef', 'Dune'];
 const RUNNER_NAMES = ['Vex', 'Jax', 'Sol', 'Rook', 'Nix'];
 const BOT_WEAPONS = ['carbine', 'smg', 'carbine', 'shotgun', 'scoped'];
+// What a bot buys when it can afford it, in preference order. Broke bots keep
+// the sidearm and save — an eco round, same as a human would play.
+const BOT_BUY_LADDER = ['carbine', 'dmr', 'smg', 'shotgun', 'lmg', 'scoped'];
 
 function laneName(x, z) {
   const lane = x < -10 ? 'west lane' : x > 10 ? 'east lane' : 'mid lane';
@@ -28,8 +31,10 @@ export class Bot {
     this.name = name;
     this.pos = new THREE.Vector3();
     this.yaw = 0; this.pitch = 0;
-    this.health = 100; this.armour = 0; this.alive = true;
-    this.kills = 0; this.deaths = 0;
+    this.health = 100; this.armour = 0; this.helmet = false; this.hasKit = false;
+    this.alive = true;
+    this.kills = 0; this.deaths = 0; this.damageDealt = 0;
+    this.money = START_MONEY;
     this.carrier = false;      // holds the charge (attackers only)
     this.state = 'idle';       // idle | patrol | push | engage | hold | plant | defuse | rotate
     this.path = []; this.pathIdx = 0;
@@ -41,13 +46,50 @@ export class Bot {
     this.aimErr = 0.030;
     this.holdUntil = 0;
     this.destSite = 'A';
-    this.hasSmoked = false; this.hasFlashed = false;
+    this.hasSmoked = false; this.hasFlashed = false; this.hasFired = false;
     this.calledOut = false;
     this.speed = 3.4;
     this.strafeDir = 1; this.strafeUntil = 0;
-    this.grenades = { frag: 1, flash: 1, smoke: 1 };
+    this.grenades = { frag: 1, flash: 1, smoke: 1, fire: 0 };
     this.weapon = this.freshWeapon(BOT_WEAPONS[id % BOT_WEAPONS.length]);
     this.buildMesh();
+  }
+  // Spend the round's money like a player: a rifle when rich, an SMG or a
+  // shotgun mid-budget, the sidearm when broke (eco — save for next round).
+  // Armour, a defuse kit for defenders and one fire grenade come with the buy.
+  buyForRound() {
+    let budget = this.money;
+    const afford = (id) => budget >= WEAPONS[id].price;
+    let pick = 'p9';
+    for (const id of BOT_BUY_LADDER) {
+      if (afford(id) && this.rng() < 0.7) { pick = id; break; }
+      if (afford(id)) { pick = id; break; }
+    }
+    if (pick !== 'p9') budget -= WEAPONS[pick].price;
+    this.weapon = this.freshWeapon(pick);
+    this.armour = 0; this.helmet = false; this.hasKit = false;
+    if (budget >= 650 && (pick !== 'p9' || budget >= 1400)) {
+      budget -= 650; this.armour = 100; this.helmet = true;
+    }
+    if (this.team === 'def' && budget >= 400 && this.rng() < 0.5) {
+      budget -= 400; this.hasKit = true;
+    }
+    this.grenades = { frag: 1, flash: 1, smoke: 1, fire: budget >= 400 && this.rng() < 0.45 ? 1 : 0 };
+    this.money = budget;
+  }
+  // Halftime side swap: same bot, other side — recolour the uniform and tag.
+  setTeam(team) {
+    this.team = team;
+    const c = team === 'def' ? PAL.teal : PAL.orange;
+    if (this.suitMat) this.suitMat.color.setHex(c);
+    if (this.bandMat) this.bandMat.color.setHex(c);
+    if (this.nameCtx) {
+      this.nameCtx.fillStyle = 'rgba(8,12,16,0.72)'; this.nameCtx.fillRect(0, 0, 256, 64);
+      this.nameCtx.fillStyle = team === 'def' ? '#7df0e2' : '#ffb37a';
+      this.nameCtx.font = '900 34px Arial'; this.nameCtx.textAlign = 'center'; this.nameCtx.textBaseline = 'middle';
+      this.nameCtx.fillText(this.name, 128, 34);
+      if (this.nameTex) this.nameTex.needsUpdate = true;
+    }
   }
   freshWeapon(id) {
     const def = WEAPONS[id];
@@ -57,6 +99,8 @@ export class Bot {
     const teamColor = this.team === 'def' ? PAL.teal : PAL.orange;
     const g = new THREE.Group();
     const suit = new THREE.MeshLambertMaterial({ color: teamColor });
+    this.suitMat = suit;
+    this.bandMat = new THREE.MeshLambertMaterial({ color: teamColor });
     const dark = new THREE.MeshLambertMaterial({ color: 0x22282d });
     const skin = new THREE.MeshLambertMaterial({ color: 0xc9976b });
     const box = (sx, sy, sz, x, y, z, m) => {
@@ -66,7 +110,7 @@ export class Bot {
     box(0.52, 0.62, 0.30, 0, 1.05, 0, suit);            // torso
     box(0.54, 0.10, 0.32, 0, 1.38, 0, dark);            // vest strap
     box(0.34, 0.32, 0.32, 0, 1.56, 0, skin);            // head
-    box(0.36, 0.08, 0.34, 0, 1.68, 0, teamColor);       // headband
+    box(0.36, 0.08, 0.34, 0, 1.68, 0, this.bandMat);    // headband
     box(0.36, 0.06, 0.05, 0, 1.58, 0.17, dark);         // visor
     box(0.16, 0.55, 0.18, -0.14, 0.42, 0, dark);         // legs
     box(0.16, 0.55, 0.18, 0.14, 0.42, 0, dark);
@@ -75,11 +119,13 @@ export class Bot {
     // Name tag: a small canvas sprite so the field reads at a glance.
     const c = document.createElement('canvas'); c.width = 256; c.height = 64;
     const ctx = c.getContext('2d');
+    this.nameCtx = ctx;
     ctx.fillStyle = 'rgba(8,12,16,0.72)'; ctx.fillRect(0, 0, 256, 64);
     ctx.fillStyle = teamColor === PAL.teal ? '#7df0e2' : '#ffb37a';
     ctx.font = '900 34px Arial'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(this.name, 128, 34);
     const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+    this.nameTex = tex;
     const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
     spr.scale.set(1.6, 0.4, 1); spr.position.set(0, 1.95, 0);
     g.add(spr);
@@ -88,9 +134,13 @@ export class Bot {
   }
   eyePos(out) { out.set(this.pos.x, this.pos.y + 1.5, this.pos.z); return out; }
   chestPos(out) { out.set(this.pos.x, this.pos.y + 1.15, this.pos.z); return out; }
-  takeDamage(amount) {
+  // Same damage model as the player: legs 25% less, helmet halves a headshot,
+  // kevlar soaks half of what is left.
+  takeDamage(amount, isHead, isLeg) {
     if (!this.alive) return 0;
     let dmg = amount;
+    if (isLeg) dmg *= 0.75;
+    if (isHead && this.helmet) dmg *= 0.5;
     if (this.armour > 0) { const s = Math.min(this.armour, dmg * 0.5); this.armour -= s; dmg -= s; }
     this.health -= dmg;
     if (this.health <= 0) { this.health = 0; this.alive = false; this.mesh.visible = false; }
@@ -103,8 +153,8 @@ export class Bot {
     this.weapon = this.freshWeapon(weaponId || BOT_WEAPONS[this.id % BOT_WEAPONS.length]);
     this.state = 'patrol'; this.path = []; this.pathIdx = 0;
     this.target = null; this.lastSeen = null; this.seenAt = -10;
-    this.burstLeft = 0; this.nextShotAt = 0; this.hasSmoked = false; this.hasFlashed = false;
-    this.calledOut = false; this.grenades = { frag: 1, flash: 1, smoke: 1 };
+    this.burstLeft = 0; this.nextShotAt = 0; this.hasSmoked = false; this.hasFlashed = false; this.hasFired = false;
+    this.calledOut = false; this.grenades = { frag: 1, flash: 1, smoke: 1, fire: 0 };
     this.holdUntil = 0;
   }
   setPath(path) { this.path = path; this.pathIdx = 0; }
@@ -157,7 +207,10 @@ export class Bot {
       const dx = tx - this.pos.x, dz = tz - this.pos.z;
       const dist = Math.hypot(dx, dz);
       if (dist < 0.6) { this.pathIdx++; }
-      else {
+      else if (w.fireZones && w.fireZones.isBurning(tx, tz, 0.5)) {
+        // The next waypoint is on fire: hold here a moment instead of walking in.
+        this.state = 'hold'; this.holdUntil = now + 1.2;
+      } else {
         const sp = this.state === 'rotate' ? 4.3 : 3.4;
         this.yaw = Math.atan2(dx, dz);
         this.map.collide(this.pos, 0.36, 1.7, (dx / dist) * sp * dt, (dz / dist) * sp * dt);
@@ -166,6 +219,15 @@ export class Bot {
           const site = w.siteByName(this.destSite);
           const ds = Math.hypot(this.pos.x - site.x, this.pos.z - site.z);
           if (ds < 14 && ds > 6) { this.hasSmoked = true; this.grenades.smoke--; w.botThrowSmoke(this, site.x, site.z); }
+        }
+        // And light the choke with an Ignis when they are close to the site.
+        if (this.team === 'atk' && !this.hasFired && this.grenades.fire > 0) {
+          const site = w.siteByName(this.destSite);
+          const ds = Math.hypot(this.pos.x - site.x, this.pos.z - site.z);
+          if (ds < 9 && ds > 4 && this.rng() < 0.6) {
+            this.hasFired = true; this.grenades.fire--;
+            w.botThrowFire(this, site.x + (this.rng() - 0.5) * 4, site.z + (this.rng() - 0.5) * 4);
+          }
         }
       }
       this.faceAlongPath();

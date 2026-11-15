@@ -11,23 +11,29 @@
 // can never teleport a player through a wall.
 import * as THREE from 'three';
 import { QuayMap, MAP } from './map.js';
+import { QuayProps } from './props.js';
 import { Player } from './player.js';
 import { Bot } from './bots.js';
 import { Effects } from './effects.js';
+import { FireZones } from './fire.js';
+import { Spectator } from './spectator.js';
+import { Settings } from './settings.js';
 import { Hud } from './hud.js';
 import { Sfx } from './audio.js';
 import { WEAPONS, GRENADES, KILL_MONEY, WIN_MONEY, LOSS_MONEY, PLANT_MONEY, START_MONEY } from './weapons.js';
+import { KILL_REWARD, lossBonus, roundMvp } from './economy.js';
 import { mulberry32, clamp, rayBox } from './util.js';
 import { PAL } from './palette.js';
 
 const STEP = 1 / 60;
 const ROUND_TIME = 105;
-const BUY_TIME = 12;
+const BUY_TIME = 15; // freeze / buy time: shop, then the gate opens
 const PLANT_TIME = 3.5;
 const DEFUSE_TIME = 5;
-const BOMB_TIME = 35;
+const BOMB_TIME = 40;
 const WIN_ROUNDS = 9;
 const MAX_ROUNDS = 17;
+const HALFTIME_ROUND = 9; // sides swap after round 8
 
 const params = new URLSearchParams(location.search);
 const SHOT = params.get('shot'); // start | play | buy | plant — staged scenes for screenshots
@@ -58,6 +64,11 @@ export class Game {
     this.input = { forward: false, back: false, left: false, right: false, jump: false, crouch: false, walk: false, fire: false, aim: false };
     this.actors = [];         // bots + player, for the scoreboard
     this.killsThisRound = new Set();
+    this.roundKills = new Map(); // actor -> kills this round (MVP)
+    this.roundHistory = [];      // 'W'/'L' per finished round, from your side
+    this.lossStreakDef = 0; this.lossStreakAtk = 0; // consecutive losses, for the bonus
+    this.planter = null; this.defuser = null; this.lastMvp = null;
+    this.swapped = false;        // halftime side swap done
     this.setupScene();
     this.setupInput();
     this.loop = this.loop.bind(this);
@@ -96,9 +107,17 @@ export class Game {
     disc.position.set(-120, 34, -40); disc.lookAt(0, 10, 0);
     this.scene.add(disc);
     this.map = new QuayMap(this.scene);
+    this.props = new QuayProps(this.map, this.scene); // barrels, overlook, sky life
     window.__quayColliders = this.map.colliders; // minimap reads the same boxes
     this.effects = new Effects(this.scene);
+    this.fireZones = new FireZones(this.scene);
     this.player = new Player(this.map, this.sfx, this.camera);
+    this.spectator = new Spectator(this.camera);
+    this.settings = new Settings();
+    this.settings.apply(this.player, this.sfx, this.hud, this.renderer);
+    const applySettings = () => this.settings.apply(this.player, this.sfx, this.hud, this.renderer);
+    this.settings.buildPanel(document.getElementById('pauseSettings'), applySettings);
+    this.settings.buildPanel(document.getElementById('menuSettings'), applySettings);
     // Nine bots fill the other nine slots of a 5v5.
     this.bots = [];
     const defNames = [...DOCKER_NAMES], atkNames = [...RUNNER_NAMES];
@@ -123,11 +142,14 @@ export class Game {
       if (keymap[e.code]) { this.input[keymap[e.code]] = true; if (e.code === 'Space') e.preventDefault(); }
       if (e.code === 'KeyR') this.player.startReload(this.time);
       if (e.code === 'KeyB') this.toggleBuy();
+      if (e.code === 'KeyF') this.player.inspectUntil = this.time + 0.9;
       if (e.code === 'Digit1') this.player.switchSlot('secondary');
       if (e.code === 'Digit2') this.player.switchSlot('primary');
-      if (e.code === 'Digit3') this.throwGrenade('frag');
-      if (e.code === 'Digit4') this.throwGrenade('flash');
-      if (e.code === 'Digit5') this.throwGrenade('smoke');
+      if (e.code === 'Digit3' || e.code === 'KeyV') this.player.switchSlot('melee');
+      if (e.code === 'Digit4') this.throwGrenade('frag');
+      if (e.code === 'Digit5') this.throwGrenade('flash');
+      if (e.code === 'Digit6') this.throwGrenade('smoke');
+      if (e.code === 'Digit7') this.throwGrenade('fire');
       if (e.code === 'KeyE') this.interactHeld = true;
       if (e.code === 'Escape') this.togglePause();
       if (e.code === 'Enter' && this.phase === 'menu') this.startMatch('def');
@@ -190,24 +212,48 @@ export class Game {
     this.player.team = team;
     this.scoreDef = 0; this.scoreAtk = 0; this.round = 1;
     this.roundWinsDef = 0; this.roundWinsAtk = 0;
-    for (const a of this.actors) { a.kills = 0; a.deaths = 0; a.money = START_MONEY; }
+    this.lossStreakDef = 0; this.lossStreakAtk = 0;
+    this.roundHistory = []; this.roundKills = new Map();
+    this.planter = null; this.defuser = null; this.lastMvp = null;
+    this.swapped = false;
+    this.spectator.stop();
+    for (const a of this.actors) { a.kills = 0; a.deaths = 0; a.damageDealt = 0; a.money = START_MONEY; }
     this.player.money = START_MONEY;
-    this.player.slots = { primary: null, secondary: this.player.freshWeapon('p9') };
+    this.player.slots = { primary: null, secondary: this.player.freshWeapon('p9'), melee: this.player.freshWeapon('knife') };
     this.player.slot = 'secondary';
-    this.player.grenades = { frag: 0, flash: 0, smoke: 0 };
-    this.player.armour = 0; this.player.hasKit = false;
+    this.player.grenades = { frag: 0, flash: 0, smoke: 0, fire: 0 };
+    this.player.armour = 0; this.player.helmet = false; this.player.hasKit = false;
     this.player.buildViewmodel();
     this.hud.hideMenu(); this.hud.hidePause();
-    this.sfx.ensure();
+    this.sfx.ensure(); this.sfx.startAmbient();
     this.startRound();
   }
+  // Halftime: after round 8 the sides swap — Dockers attack, Runners defend —
+  // and the loss bonuses reset, same as a real half.
+  swapSides() {
+    this.swapped = true;
+    for (const a of this.actors) {
+      if (a === this.player) a.team = a.team === 'def' ? 'atk' : 'def';
+      else a.setTeam(a.team === 'def' ? 'atk' : 'def');
+    }
+    this.lossStreakDef = 0; this.lossStreakAtk = 0;
+    this.hud.banner('HALFTIME — SIDES SWAPPED',
+      this.player.team === 'atk' ? 'You are Runners now — plant the charge' : 'You are Dockers now — hold the sites', 3.5);
+    this.sfx.roundStart();
+  }
   startRound() {
+    if (this.round === HALFTIME_ROUND && !this.swapped) this.swapSides();
     this.phase = 'buy';
     this.buyTimer = BUY_TIME;
     this.timer = ROUND_TIME;
     this.plantProg = 0; this.defuseProg = 0;
     this.botPlantProg = 0; this.botDefuseProg = 0;
     this.killsThisRound.clear();
+    this.roundKills = new Map();
+    this.planter = null; this.defuser = null;
+    // Bots spend their money before the freeze ends: rifles when rich, an eco
+    // sidearm when broke, armour and a kit when the budget allows.
+    for (const b of this.bots) b.buyForRound();
     // Bomb: carried by the player when attacking, else by a random attacker bot.
     const attackers = this.bots.filter((b) => b.team === 'atk');
     for (const b of this.bots) b.carrier = false;
@@ -237,24 +283,37 @@ export class Game {
     // Face the attackers toward the quay, the defenders toward the gate.
     this.player.yaw = this.player.team === 'atk' ? Math.PI / 2 : -Math.PI / 2;
     this.hud.showBuy(this.player.money);
-    this.hud.banner(`ROUND ${this.round}`, this.player.team === 'atk' ? 'Plant the charge at Site A or Site B' : 'Hold the sites — stop the plant', 2.2);
+    const matchPoint = this.scoreDef === WIN_ROUNDS - 1 || this.scoreAtk === WIN_ROUNDS - 1;
+    this.hud.banner(matchPoint ? `MATCH POINT — ROUND ${this.round}` : `ROUND ${this.round} — BUY PHASE`,
+      matchPoint
+        ? (this.scoreDef === WIN_ROUNDS - 1 ? 'Dockers are one round from the match' : 'Runners are one round from the match')
+        : `${BUY_TIME}s freeze — spend your money (B), then the gate opens`, 2.6);
     this.sfx.roundStart();
   }
   endRound(winner, reason) {
     if (this.phase === 'roundEnd' || this.phase === 'matchEnd') return;
     this.phase = 'roundEnd';
     this.endTimer = 4.5;
-    this.hud.hideBuy(); this.hud.hideProgress();
+    this.hud.hideBuy(); this.hud.hideProgress(); this.hud.setBombBar(null);
     if (winner === 'def') { this.scoreDef++; this.roundWinsDef++; }
     else { this.scoreAtk++; this.roundWinsAtk++; }
+    // Economy: winners take the round win; losers take a loss bonus that grows
+    // with their losing streak, so a broke team can force-buy back.
+    if (winner === 'def') { this.lossStreakDef = 0; this.lossStreakAtk++; }
+    else { this.lossStreakAtk = 0; this.lossStreakDef++; }
     for (const a of this.actors) {
       if (a.team === winner) a.money += WIN_MONEY;
-      else a.money += LOSS_MONEY;
+      else a.money += lossBonus(a.team === 'def' ? this.lossStreakDef : this.lossStreakAtk);
     }
+    const mvp = roundMvp(this.actors, this.roundKills, this.planter, this.defuser);
+    this.lastMvp = mvp;
+    if (mvp) mvp.money += 300; // MVP bonus
+    this.roundHistory.push(this.player.team === winner ? 'W' : 'L');
+    this.hud.setRoundHistory(this.roundHistory);
     const playerWon = this.player.team === winner;
     this.hud.banner(
       winner === 'def' ? 'DOCKERS WIN THE ROUND' : 'RUNNERS WIN THE ROUND',
-      `${reason} · ${this.scoreDef} — ${this.scoreAtk}`,
+      `${reason} · ${this.scoreDef} — ${this.scoreAtk}${mvp ? ` · ★ MVP: ${mvp.name}` : ''}`,
       4.2,
     );
     if (playerWon) this.sfx.roundWin(); else this.sfx.roundLose();
@@ -274,12 +333,13 @@ export class Game {
 
   // ---------- shooting ----------
   // One hitscan shot from `shooter` along `dir` (already spread). Tests the map
-  // first, then every living actor's body and head boxes, and takes the nearest
-  // hit. Returns the hit actor and whether it was a headshot.
-  resolveShot(shooter, ox, oy, oz, dx, dy, dz, weapon, isPlayerShot) {
+  // first, then every living actor's head, body and leg boxes, and takes the
+  // nearest hit. Returns the hit actor and whether it was a headshot. maxDist
+  // caps the ray — the knife uses it for its 2.2 m reach.
+  resolveShot(shooter, ox, oy, oz, dx, dy, dz, weapon, isPlayerShot, maxDist = 90) {
     const dl = Math.hypot(dx, dy, dz) || 1;
     dx /= dl; dy /= dl; dz /= dl;
-    let bestT = Infinity, bestActor = null, bestHead = false, bestPoint = null;
+    let bestT = maxDist, bestActor = null, bestHead = false, bestLeg = false, bestPoint = null;
     const tmp = { x: 0, y: 0, z: 0 };
     for (const b of this.map.colliders) {
       const t = rayBox(ox, oy, oz, dx, dy, dz, b);
@@ -288,15 +348,16 @@ export class Game {
     for (const a of this.actors) {
       if (a === shooter || !a.alive) continue;
       const boxes = [
-        { minX: a.pos.x - 0.30, maxX: a.pos.x + 0.30, minY: a.pos.y + 0.25, maxY: a.pos.y + 1.42, minZ: a.pos.z - 0.30, maxZ: a.pos.z + 0.30, head: false },
-        { minX: a.pos.x - 0.20, maxX: a.pos.x + 0.20, minY: a.pos.y + 1.42, maxY: a.pos.y + 1.78, minZ: a.pos.z - 0.20, maxZ: a.pos.z + 0.20, head: true },
+        { minX: a.pos.x - 0.30, maxX: a.pos.x + 0.30, minY: a.pos.y + 0.75, maxY: a.pos.y + 1.42, minZ: a.pos.z - 0.30, maxZ: a.pos.z + 0.30, zone: 'body' },
+        { minX: a.pos.x - 0.20, maxX: a.pos.x + 0.20, minY: a.pos.y + 1.42, maxY: a.pos.y + 1.78, minZ: a.pos.z - 0.20, maxZ: a.pos.z + 0.20, zone: 'head' },
+        { minX: a.pos.x - 0.28, maxX: a.pos.x + 0.28, minY: a.pos.y + 0.25, maxY: a.pos.y + 0.75, minZ: a.pos.z - 0.28, maxZ: a.pos.z + 0.28, zone: 'leg' },
       ];
       for (const b of boxes) {
         const t = rayBox(ox, oy, oz, dx, dy, dz, b);
-        if (t > 0 && t < bestT) { bestT = t; bestActor = a; bestHead = b.head; }
+        if (t > 0 && t < bestT) { bestT = t; bestActor = a; bestHead = b.zone === 'head'; bestLeg = b.zone === 'leg'; }
       }
     }
-    if (bestT === Infinity) bestT = 90;
+    if (bestT === Infinity) bestT = maxDist;
     tmp.x = ox + dx * bestT; tmp.y = oy + dy * bestT; tmp.z = oz + dz * bestT;
     bestPoint = { x: tmp.x, y: tmp.y, z: tmp.z };
     if (bestActor) {
@@ -305,16 +366,29 @@ export class Game {
       if (dist > weapon.range) dmg *= weapon.falloff + (1 - weapon.falloff) * Math.max(0, 1 - (dist - weapon.range) / weapon.range);
       if (bestHead) dmg *= weapon.headMult;
       if (bestActor === this.player) {
-        const dealt = this.player.takeDamage(dmg, bestHead);
+        const dealt = this.player.takeDamage(dmg, bestHead, bestLeg);
         this.hud.damageFlash(dealt);
         this.sfx.hurt();
+        // Hit-direction arc: where did that shot come from, relative to facing?
+        if (shooter && shooter.pos) {
+          const wx = shooter.pos.x - this.player.pos.x, wz = shooter.pos.z - this.player.pos.z;
+          const worldAng = Math.atan2(-wx, -wz);
+          let rel = (worldAng - this.player.yaw) * 180 / Math.PI;
+          while (rel > 180) rel -= 360; while (rel < -180) rel += 360;
+          this.hud.hitDir(rel);
+        }
         if (!this.player.alive) this.onKill(shooter, this.player, bestHead, weapon);
       } else {
-        const dealt = bestActor.takeDamage(dmg);
-        if (isPlayerShot) { this.hud.hitmarker(bestHead); this.sfx.hit(bestHead); }
+        const dealt = bestActor.takeDamage(dmg, bestHead, bestLeg);
+        if (shooter) shooter.damageDealt = (shooter.damageDealt || 0) + dealt;
+        if (isPlayerShot) {
+          this.hud.hitmarker(bestHead);
+          if (bestHead) this.sfx.ding(); else this.sfx.hit(bestHead);
+          this.hud.dmgNum(dealt, bestHead);
+        }
         if (!bestActor.alive) this.onKill(shooter, bestActor, bestHead, weapon);
       }
-    } else if (bestT < 90) {
+    } else if (bestT < maxDist) {
       this.effects.sparks(bestPoint, 4);
     }
     return { actor: bestActor, head: bestHead, point: bestPoint, dist: bestT };
@@ -324,14 +398,28 @@ export class Game {
     if (!w || !p.alive || this.phase !== 'round') return;
     if (p.reloading) return;
     if (this.time - p.lastShotAt < 1 / w.def.fireRate) return;
+    const eye = p.eyePos(new THREE.Vector3());
+    const fwd = new THREE.Vector3(); this.camera.getWorldDirection(fwd);
+    // The knife is a short raycast, not a bullet: silent, no ammo, no tracer.
+    if (w.def.melee) {
+      p.lastShotAt = this.time;
+      this.sfx.knifeSwing();
+      const hit = this.resolveShot(p, eye.x, eye.y, eye.z, fwd.x, fwd.y, fwd.z, w.def, true, w.def.range);
+      if (hit.actor) { this.sfx.knifeHit(); if (!hit.actor.alive) this.hud.killConfirm(false); }
+      return;
+    }
     if (w.mag <= 0) { this.sfx.dryFire(); p.lastShotAt = this.time; p.startReload(this.time); return; }
     w.mag--;
     p.lastShotAt = this.time;
     p.bloom = Math.min(w.def.bloomMax, p.bloom + w.def.bloomPerShot);
-    p.recoilPitch += w.def.recoil * (p.scoped ? 0.5 : 1);
+    // Deterministic recoil pattern: each shot in a burst kicks up and sideways
+    // on a fixed curve, so bursts can be learned and pulled down.
+    p.shotCount++;
+    const pat = w.def.pattern || [[0, 1]];
+    const pk = pat[(p.shotCount - 1) % pat.length];
+    p.yaw += pk[0] * 0.0016;
+    p.recoilPitch += w.def.recoil * pk[1] * (p.scoped ? 0.5 : 1);
     // Muzzle position: just ahead of the viewmodel.
-    const eye = p.eyePos(new THREE.Vector3());
-    const fwd = new THREE.Vector3(); this.camera.getWorldDirection(fwd);
     const muzzle = eye.clone().addScaledVector(fwd, 0.6);
     muzzle.y -= 0.12;
     this.effects.muzzle(muzzle);
@@ -349,8 +437,14 @@ export class Game {
   }
   onKill(killer, victim, head, weapon) {
     victim.deaths++;
-    if (killer) killer.kills++;
-    if (killer === this.player) this.player.money += KILL_MONEY;
+    if (killer) {
+      killer.kills++;
+      this.roundKills.set(killer, (this.roundKills.get(killer) || 0) + 1);
+      // Kill money depends on the weapon: a scoped-rifle kill pays $100, a
+      // knife kill pays $1500, everything else $300.
+      killer.money += KILL_REWARD[weapon && weapon.id] || KILL_MONEY;
+      if (killer === this.player) this.hud.killConfirm(head);
+    }
     const kName = killer ? killer.name : '—';
     const vName = victim.name;
     this.hud.addFeed(`${kName} <span class="wp">${weapon ? weapon.name : ''}</span> ${head ? '<span class="hs">HS</span> ' : ''}${vName}`);
@@ -359,6 +453,8 @@ export class Game {
       this.bomb.state = 'dropped'; this.bomb.x = victim.pos.x; this.bomb.z = victim.pos.z;
       this.bomb.carrier = null;
     }
+    // Deathcam: the player spectates a living teammate.
+    if (victim === this.player) this.spectator.start(this.player, this.actors);
     this.checkRoundEnd();
   }
   checkRoundEnd() {
@@ -408,6 +504,11 @@ export class Game {
         if (a === this.player) { this.player.flashUntil = this.time + 1.6; this.hud.flashbang(0.9); }
         else if (a.update) { a.reactUntil = Math.max(a.reactUntil, this.time + 1.8); a.target = null; }
       }
+    } else if (g.kind === 'fire') {
+      // Ignis: light a fire zone that burns for 7 seconds and denies the area.
+      this.fireZones.ignite(pos.x, pos.z);
+      this.sfx.fireCrackle();
+      this.hud.addFeed(`<span class="hs">IGNIS</span> — fire zone lit`);
     } else {
       // Smoke: three puffs that hang for 14 seconds and block sight for everyone.
       for (let i = 0; i < 3; i++) {
@@ -423,7 +524,7 @@ export class Game {
     if (kind === 'weapon') {
       if (p.buyWeapon(key)) { this.sfx.buy(); this.hud.showBuy(p.money); this.hud.setWeapon(p); }
     } else if (kind === 'armour') {
-      if (p.money >= 650 && p.armour < 100) { p.money -= 650; p.armour = 100; this.sfx.buy(); this.hud.showBuy(p.money); }
+      if (p.money >= 650 && p.armour < 100) { p.money -= 650; p.armour = 100; p.helmet = true; this.sfx.buy(); this.hud.showBuy(p.money); }
     } else if (kind === 'kit') {
       if (p.team === 'def' && p.money >= 400 && !p.hasKit) { p.money -= 400; p.hasKit = true; this.sfx.buy(); this.hud.showBuy(p.money); }
     } else if (kind === 'grenade') {
@@ -435,9 +536,9 @@ export class Game {
 
   scoreboardHtml() {
     const rows = [...this.actors].sort((a, b) => b.kills - a.kills || a.deaths - b.deaths);
-    let html = '<table><tr><th>PLAYER</th><th>TEAM</th><th>K</th><th>D</th><th>$</th></tr>';
+    let html = '<table><tr><th>PLAYER</th><th>TEAM</th><th>K</th><th>D</th><th>DMG</th><th>$</th><th>MVP</th></tr>';
     for (const a of rows) {
-      html += `<tr class="${a === this.player ? 'me' : ''}"><td>${a.name}${a.carrier ? ' ●' : ''}</td><td>${a.team === 'def' ? 'DOCKERS' : 'RUNNERS'}</td><td>${a.kills}</td><td>${a.deaths}</td><td>$${a.money.toLocaleString()}</td></tr>`;
+      html += `<tr class="${a === this.player ? 'me' : ''}"><td>${a.name}${a.carrier ? ' ●' : ''}</td><td>${a.team === 'def' ? 'DOCKERS' : 'RUNNERS'}</td><td>${a.kills}</td><td>${a.deaths}</td><td>${Math.round(a.damageDealt || 0)}</td><td>$${(a.money || 0).toLocaleString()}</td><td class="mvp">${a === this.lastMvp ? '★' : ''}</td></tr>`;
     }
     return html + '</table>';
   }
@@ -496,6 +597,11 @@ export class Game {
   botThrowFlash(bot, x, y, z) {
     this.grenadesFlying.push({ kind: 'flash', x, y, z, vx: 0, vy: 0, vz: 0, t: 0, fuse: 0.4, fromPlayer: false });
   }
+  botThrowFire(bot, x, z) {
+    this.fireZones.ignite(x, z);
+    this.sfx.fireCrackle();
+    this.hud.callout(bot.name, 'Ignis out — that choke is burning!', bot.team);
+  }
   botPlant(bot, dt) {
     this.botPlantProg += dt / PLANT_TIME;
     this.hud.showProgress(`${bot.name.toUpperCase()} IS PLANTING THE CHARGE…`, this.botPlantProg);
@@ -504,6 +610,7 @@ export class Game {
       this.bomb.state = 'planted'; this.bomb.x = bot.pos.x; this.bomb.z = bot.pos.z;
       this.bomb.site = bot.destSite; this.bomb.timer = BOMB_TIME; this.bomb.beepAt = 0;
       this.botPlantProg = 0; this.hud.hideProgress();
+      this.planter = bot;
       this.sfx.plant();
       this.hud.banner('CHARGE PLANTED', `Site ${this.bomb.site} — ${this.player.team === 'def' ? 'defuse it!' : 'defend it!'}`, 3);
       this.hud.addFeed(`<span class="hs">CHARGE PLANTED</span> · SITE ${this.bomb.site}`);
@@ -512,10 +619,12 @@ export class Game {
     }
   }
   botDefuse(bot, dt) {
-    this.botDefuseProg += dt / DEFUSE_TIME;
+    const need = bot.hasKit ? DEFUSE_TIME / 2 : DEFUSE_TIME; // a kit halves defuse time
+    this.botDefuseProg += dt / need;
     this.hud.showProgress(`${bot.name.toUpperCase()} IS DEFUSING…`, this.botDefuseProg);
     if (this.botDefuseProg >= 1) {
       this.bomb.state = 'done'; this.botDefuseProg = 0; this.hud.hideProgress();
+      this.defuser = bot;
       this.sfx.defuse();
       this.endRound('def', 'Dockers defused the charge');
     }
@@ -534,11 +643,22 @@ export class Game {
       if (this.bomb.state !== 'planted') this.timer -= dt;
       else {
         this.bomb.timer -= dt;
-        if (this.time - this.bomb.beepAt > Math.max(0.25, this.bomb.timer / 35)) { this.bomb.beepAt = this.time; this.sfx.beep(this.bomb.timer < 8); }
+        if (this.time - this.bomb.beepAt > Math.max(0.25, this.bomb.timer / 40)) { this.bomb.beepAt = this.time; this.sfx.beep(this.bomb.timer < 8); }
         if (this.bomb.timer <= 0) {
+          // Detonation: flash, smoke and a damage radius that kills the careless.
           this.sfx.explosion();
-          this.effects.sparks({ x: this.bomb.x, y: 1, z: this.bomb.z }, 50, 8);
-          this.endRound('atk', 'The charge blew Site ' + this.bomb.site);
+          this.effects.explosion({ x: this.bomb.x, y: 1, z: this.bomb.z });
+          for (const a of this.actors) {
+            if (!a.alive) continue;
+            const d = Math.hypot(a.pos.x - this.bomb.x, a.pos.z - this.bomb.z);
+            if (d < 12) {
+              const dmg = 200 * (1 - d / 14);
+              if (a === this.player) { this.player.takeDamage(dmg, false, false); this.hud.damageFlash(dmg); }
+              else a.takeDamage(dmg, false, false);
+              if (!a.alive) this.onKill(null, a, false, { name: 'CHARGE', id: 'FRAG' });
+            }
+          }
+          this.endRound('atk', 'The charge detonated at Site ' + this.bomb.site);
         }
       }
       if (this.timer <= 0 && this.bomb.state !== 'planted') this.endRound('def', 'Time — the charge never went off');
@@ -555,22 +675,31 @@ export class Game {
       }
     } else if (this.phase === 'roundEnd') {
       this.endTimer -= dt;
+      // The round is over: the deathcam goes free so the player can watch.
+      if (this.spectator.active && !this.spectator.free) this.spectator.setFree();
       if (this.endTimer <= 0) {
         if (this.checkMatchEnd()) return;
         this.round++;
         this.startRound();
       }
     }
-    // Player.
+    // Player. During the buy freeze the player can shop but not move.
     const p = this.player;
+    const moveInput = this.phase === 'buy'
+      ? { ...this.input, forward: false, back: false, left: false, right: false, jump: false, crouch: false }
+      : this.input;
     if (p.alive && (this.phase === 'round' || this.phase === 'buy')) {
-      p.aiming = this.input.aim && p.weapon() && p.weapon().def.scoped;
-      this.camera.fov = p.scoped ? 32 : 74;
+      p.aiming = this.input.aim && p.weapon() && (p.weapon().def.scoped || p.weapon().def.ads);
+      this.camera.fov = p.scoped ? 32 : p.aiming ? 55 : this.settings.get('fov');
       this.camera.updateProjectionMatrix();
-      p.update(dt, this.input, this.time);
+      p.update(dt, moveInput, this.time);
+      if (this.time - p.lastShotAt > 0.5) p.shotCount = 0; // burst resets
       if (p.reloading && this.time >= p.reloadUntil) p.finishReload();
       if (this.input.fire && this.phase === 'round') this.playerShoot();
       if (this.time < p.flashUntil) this.hud.flashbang(0.85);
+    } else if (!p.alive && (this.phase === 'round' || this.phase === 'roundEnd')) {
+      // Dead: spectate a teammate, or fly the free camera after the round ends.
+      this.spectator.update(dt);
     }
     // Plant / defuse by holding E.
     if (this.phase === 'round' && this.interactHeld && p.alive) {
@@ -584,6 +713,7 @@ export class Game {
             this.bomb.state = 'planted'; this.bomb.x = p.pos.x; this.bomb.z = p.pos.z;
             this.bomb.site = site === MAP.siteA ? 'A' : 'B'; this.bomb.timer = BOMB_TIME; this.bomb.beepAt = 0;
             this.plantProg = 0; this.hud.hideProgress();
+            this.planter = p;
             p.money += PLANT_MONEY; this.sfx.plant();
             this.hud.banner('CHARGE PLANTED', `Site ${this.bomb.site} — defend it!`, 3);
           }
@@ -596,6 +726,7 @@ export class Game {
           this.hud.showProgress(p.hasKit ? 'DEFUSING…  (kit — half time)' : 'DEFUSING…  (hold E)', this.defuseProg);
           if (this.defuseProg >= 1) {
             this.bomb.state = 'done'; this.defuseProg = 0; this.hud.hideProgress();
+            this.defuser = p;
             this.sfx.defuse(); this.endRound('def', 'You defused the charge');
           }
         } else { this.defuseProg = Math.max(0, this.defuseProg - dt * 2); this.hud.hideProgress(); }
@@ -605,8 +736,8 @@ export class Game {
       this.defuseProg = Math.max(0, this.defuseProg - dt * 2);
       if (!this.interactHeld) this.hud.hideProgress();
     }
-    // Bots.
-    if (this.phase === 'round' || this.phase === 'buy') {
+    // Bots. Frozen during the buy phase, like everyone else.
+    if (this.phase === 'round') {
       for (const b of this.bots) b.update(dt, this.time, this);
     }
     // Grenades in flight.
@@ -623,6 +754,7 @@ export class Game {
     this.hud.setScore(this.scoreDef, this.scoreAtk, this.round, MAX_ROUNDS,
       this.phase === 'buy' ? this.buyTimer : this.bomb.state === 'planted' ? this.bomb.timer : this.timer,
       this.roundWinsDef, this.roundWinsAtk, phase);
+    this.hud.setBombBar(this.bomb.state === 'planted' ? this.bomb.timer / BOMB_TIME : null, this.bomb.timer, this.bomb.site);
     this.hud.setVitals(p);
     this.hud.setWeapon(p);
     this.hud.setCrosshair(p.currentSpread() * 900, p.scoped);
@@ -640,6 +772,13 @@ export class Game {
       } else if (this.bomb.state === 'planted') hint = `CHARGE PLANTED — SITE ${this.bomb.site} · ${Math.ceil(this.bomb.timer)}s`;
     }
     this.hud.hint(hint);
+    // Fire zones burn, and the sky lives: clouds, gulls, crane, flags, water.
+    this.fireZones.update(dt, this.time, this.actors, (a, dmg) => {
+      if (a === this.player) { this.player.takeDamage(dmg, false, false); this.hud.damageFlash(dmg); }
+      else a.takeDamage(dmg, false, false);
+      if (!a.alive) this.onKill(null, a, false, { name: 'IGNIS', id: 'IGNIS' });
+    });
+    this.props.update(dt, this.time);
     this.effects.update(dt);
   }
 
@@ -658,7 +797,8 @@ export class Game {
 
   // ---------- staged screenshot scenes ----------
   // ?shot= picks a frozen, fully-HUD'd moment so the screenshots are real renders
-  // of the game's own code: the menu, a mid-firefight, the buy phase, and a plant.
+  // of the game's own code: the menu, a mid-firefight, the buy phase, a plant,
+  // the scoreboard, and a look down the mid connector.
   stageShot(kind) {
     const stage = () => {
       if (kind === 'start') {
@@ -672,7 +812,7 @@ export class Game {
         this.player.money = 3850;
         this.player.buyWeapon('carbine');
         this.player.money = 3850;
-        this.player.grenades = { frag: 1, flash: 1, smoke: 1 };
+        this.player.grenades = { frag: 1, flash: 1, smoke: 1, fire: 1 };
         this.hud.showBuy(this.player.money);
         this.hud.bannerEl.style.display = 'none'; this.hud.bannerTimer = 0;
         // Face the ferry and the water so the shop's backdrop is bright, not a wall.
@@ -698,36 +838,89 @@ export class Game {
         if (mate) { mate.resetSpawn(-24, -10, Math.PI / 2, 'smg', 0); mate.mesh.position.set(-24, 0, -10); }
         this.camera.position.set(this.player.pos.x, 1.62, this.player.pos.z);
         this.camera.rotation.set(-0.06, this.player.yaw, 0, 'YXZ');
+      } else if (kind === 'scores') {
+        // Tab scoreboard: K/D, damage, money, MVP star and the round history.
+        this.startMatch('def');
+        this.phase = 'roundEnd'; this.endTimer = 4.5; // stay on this round: a 0 timer would advance to round 9 and swap sides
+        this.round = 8; this.scoreDef = 5; this.scoreAtk = 3; this.timer = 62;
+        this.roundWinsDef = 5; this.roundWinsAtk = 3;
+        this.roundHistory = ['W', 'L', 'W', 'W', 'L', 'W', 'W'];
+        this.player.kills = 12; this.player.deaths = 4; this.player.damageDealt = 1450; this.player.money = 5200;
+        this.lastMvp = this.player;
+        const stats = { Kael: [9, 5, 1180, 4300], Mara: [7, 6, 940, 2100], Ilya: [5, 7, 620, 1750], Sef: [4, 6, 510, 2900], Vex: [10, 6, 1320, 3600], Jax: [6, 8, 780, 1200], Sol: [5, 7, 690, 2400], Rook: [3, 9, 410, 900], Nix: [4, 8, 530, 1500] };        for (const b of this.bots) {
+          const s = stats[b.name] || [2, 5, 300, 1000];
+          b.kills = s[0]; b.deaths = s[1]; b.damageDealt = s[2]; b.money = s[3];
+        }
+        this.player.resetSpawn(-20, 16, 0.08);
+        this.camera.position.set(14, 9, 18);
+        this.camera.lookAt(-8, 1, -6);
+        this.hud.hideBuy();
+        this.hud.showScores(this.scoreboardHtml());
+        this.hud.setRoundHistory(this.roundHistory);
+        this.hud.bannerEl.style.display = 'none'; this.hud.bannerTimer = 0;
+      } else if (kind === 'mid') {
+        // Down the new mid connector: window in the north wall, an enemy at the
+        // far mouth, smoke and an Ignis fire zone lighting the tunnel.
+        this.startMatch('def');
+        this.phase = 'round';
+        this.hud.hideBuy();
+        this.hud.bannerEl.style.display = 'none'; this.hud.bannerTimer = 0;
+        this.round = 3; this.scoreDef = 1; this.scoreAtk = 1; this.timer = 88;
+        this.roundWinsDef = 1; this.roundWinsAtk = 1;
+        this.player.resetSpawn(2, -6, -Math.PI / 2);
+        this.player.health = 100; this.player.armour = 50; this.player.money = 4200;
+        this.player.buyWeapon('carbine');
+        this.player.money = 4200;
+        const w = this.player.weapon(); w.mag = 22; w.reserve = 75;
+        this.player.grenades = { frag: 1, flash: 1, smoke: 1, fire: 1 };
+        const e1 = this.bots.find((b) => b.team === 'atk' && b.name === 'Vex');
+        e1.resetSpawn(13.5, -6, Math.PI / 2, 'carbine', 50);
+        e1.mesh.position.set(13.5, 0, -6); e1.mesh.rotation.y = Math.PI / 2;
+        const e2 = this.bots.find((b) => b.team === 'atk' && b.name === 'Jax');
+        e2.resetSpawn(11, -7.2, Math.PI * 0.8, 'smg', 0);
+        e2.mesh.position.set(11, 0, -7.2); e2.mesh.rotation.y = Math.PI * 0.8;
+        this.fireZones.ignite(9, -5.2);
+        this.effects.smoke(16.5, 1.4, -6, 3, 14);
+        const eye = this.player.eyePos(new THREE.Vector3());
+        this.effects.tracer({ x: eye.x + 0.3, y: eye.y - 0.15, z: eye.z - 0.5 }, { x: 13.5, y: 1.2, z: -6 });
+        this.camera.position.set(this.player.pos.x, 1.62, this.player.pos.z);
+        this.camera.rotation.set(-0.02, this.player.yaw, 0, 'YXZ');
       } else {
-        // play: mid-firefight cover — tracers, smoke, two enemies in the open,
-        // full HUD, golden-hour light down the waterside lane past the ferry.
+        // play: mid-firefight cover — the denser map now: the overlook platform
+        // and stairs, an Ignis fire zone and smoke in mid, an enemy up on the
+        // overlook and one pushing the mid corridor, tracers and a full HUD.
+        // The camera looks east down the clear z=4 corridor, so the overlook,
+        // the fire and both enemies read in one frame.
         this.startMatch('def');
         this.phase = 'round';
         this.hud.hideBuy();
         this.hud.bannerEl.style.display = 'none'; this.hud.bannerTimer = 0;
         this.round = 7; this.scoreDef = 4; this.scoreAtk = 3; this.timer = 62;
         this.roundWinsDef = 4; this.roundWinsAtk = 3;
-        this.player.resetSpawn(-20, 16, 0.08);
+        this.player.resetSpawn(-6, 4, -Math.PI / 2);
         this.player.health = 86; this.player.armour = 94; this.player.money = 5000;
         this.player.buyWeapon('carbine');
         this.player.money = 3850;
         const w = this.player.weapon(); w.mag = 24; w.reserve = 90;
-        this.player.grenades = { frag: 1, flash: 1, smoke: 2 };
+        this.player.grenades = { frag: 1, flash: 1, smoke: 2, fire: 1 };
         const e1 = this.bots.find((b) => b.team === 'atk' && b.name === 'Vex');
         const e2 = this.bots.find((b) => b.team === 'atk' && b.name === 'Jax');
-        e1.resetSpawn(-21, -2, Math.PI, 'carbine', 50); e1.mesh.position.set(-21, 0, -2); e1.mesh.rotation.y = Math.PI;
-        e2.resetSpawn(-22.5, -10, Math.PI * 0.9, 'smg', 0); e2.mesh.position.set(-22.5, 0, -10); e2.mesh.rotation.y = Math.PI * 0.9;
+        // Vex holds the overlook deck, 2.84 m up; Jax pushes the mid corridor.
+        e1.resetSpawn(10, 4, Math.PI * 0.85, 'carbine', 50);
+        e1.pos.y = 2.84; e1.mesh.position.set(10, 2.84, 4); e1.mesh.rotation.y = Math.PI * 0.85;
+        e2.resetSpawn(5, 3, Math.PI / 2, 'smg', 0); e2.mesh.position.set(5, 0, 3); e2.mesh.rotation.y = Math.PI / 2;
         const t1 = this.bots.find((b) => b.team === 'def' && b.name === 'Kael');
-        t1.resetSpawn(-18, 10, 0.2, 'carbine', 50); t1.mesh.position.set(-18, 0, 10);
-        // A live tracer from the player's muzzle toward the first enemy, plus a
-        // smoke cloud at the lane's edge — the lane itself stays open so both
-        // enemies read in the frame.
+        t1.resetSpawn(0, 6.5, -Math.PI / 2, 'carbine', 50); t1.mesh.position.set(0, 0, 6.5);
+        this.fireZones.ignite(2, 4);
+        // Smoke off the sightline to the overlook, so the enemy on the deck
+        // still reads through the frame instead of hiding behind a puff.
+        this.effects.smoke(5, 1.4, 0.8, 3, 14);
+        this.effects.smoke(7.5, 1.6, 6.8, 2.5, 14);
+        // A live tracer from the player's muzzle toward the overlook.
         const eye = this.player.eyePos(new THREE.Vector3());
-        this.effects.tracer({ x: eye.x + 0.3, y: eye.y - 0.15, z: eye.z - 0.5 }, { x: -21, y: 1.2, z: -2 });
-        this.effects.smoke(-19, 1.4, -3, 3, 14);
-        this.effects.smoke(-18.5, 1.6, -5, 2.5, 14);
+        this.effects.tracer({ x: eye.x + 0.3, y: eye.y - 0.15, z: eye.z - 0.5 }, { x: 10, y: 4.6, z: 4 });
         this.camera.position.set(this.player.pos.x, 1.62, this.player.pos.z);
-        this.camera.rotation.set(-0.04, this.player.yaw, 0, 'YXZ');
+        this.camera.rotation.set(-0.02, this.player.yaw, 0, 'YXZ');
       }
       // One live step so the HUD, minimap and crosshair refresh from the staged
       // state, then clear anything the bots said during it and lay the staged
@@ -739,8 +932,16 @@ export class Game {
       if (kind === 'play') {
         this.hud.addFeed('Vex <span class="wp">AR-47 CARBINE</span> <span class="hs">HS</span> Warden Kael');
         this.hud.addFeed('Mara <span class="wp">K9 COMPACT SMG</span> Jax');
-        this.hud.callout('Vex', 'contact west lane!', 'atk');
-        this.hud.callout('Kael', 'two pushing the west lane — hold the angle', 'def');
+        this.hud.addFeed('YOU <span class="wp">IGNIS</span> Rook');
+        this.hud.callout('Vex', 'contact mid — one on the overlook!', 'atk');
+        this.hud.callout('Kael', 'fire on mid, do not push through it', 'def');
+      } else if (kind === 'mid') {
+        this.hud.addFeed('Vex <span class="wp">TEMPEST 7.62</span> Mara');
+        this.hud.callout('Vex', 'holding the connector window — watch it!', 'atk');
+        this.hud.callout('Kael', 'two in the tunnel, Ignis lit', 'def');
+      } else if (kind === 'scores') {
+        this.hud.showScores(this.scoreboardHtml());
+        this.hud.setRoundHistory(this.roundHistory);
       } else if (kind === 'plant') {
         this.hud.addFeed('Vex <span class="wp">AR-47 CARBINE</span> Mara');
         this.hud.callout('Vex', 'planting at Site A — cover me!', 'atk');
